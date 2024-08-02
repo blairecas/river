@@ -1,0 +1,3058 @@
+	.TITLE	RIVCPU
+	.ENABL	LC,AMA
+	.ASECT
+	.=0
+
+@include common.mac
+@include cpu_header.mac
+
+Start:	; clean upper CPU RAM
+	mov	#CpuEnd, R0
+	mov	#157776-CpuEnd/2, R3
+	clr	(R0)+
+	sob	R3, .-2
+
+	; ask for 'ppu phase 3'
+	clr	CMDBUF
+	mov	#30, PPUYYY
+        ; wait for ackn of phase 3
+        cmp     #3, PPUYYY
+        bne     .-6
+
+	mov	#VSYNI, @#100	; vsync interrupt
+	mtps	#0
+
+	; all set - start main code
+	clr	CURMOD
+
+; //////////////////////////////////////////////////////////////////////////////
+; // MAIN
+; //////////////////////////////////////////////////////////////////////////////
+
+MAINCY:	call	WAITCY			; vsync wait cycle
+	call	DBGINF			; debug info
+	; key UST - pause
+	tst	KEYUST
+	beq	10$
+	clr	KEYUST
+	com	PAUSE
+10$:	tst	PAUSE
+	bne	MAINCY
+	; run procedures
+	mov	CURMOD, R0
+	asl	R0
+	call	@MAINCT(R0)
+	; at the very last - process setup keys
+	call	RGBCHK			; RGB/GRB
+	call	STPCHK			; STOP key - reset game
+	call	KK2CHK			; K2 key - debug on|off
+	jmp	MAINCY
+
+MAINCT:	.WORD	MAINC0, MAINC1, MAINC2, MAINC3, MAINC4, MAINC5, MAINC6
+
+
+; first stage - init
+MAINC0:	; game vars from reset
+	cmp	SCORE, HSCORE		; update hiscore?
+	ble	10$
+	mov	SCORE, HSCORE
+10$:	clr	SCORE			; clear current score
+	mov	#9., LIVES		; default lives = 3
+	mov	#1., LEVEL		; level
+	mov	#1., SLEVEL		; stored level
+	; reset random, 0x14, 0xA8
+        movb	#24, RANDLO
+	movb	#250, RANDHI
+	mov	RANDLO, RANSLO		; duplicate them -> 1
+	mov	RANDLO, RANS0L		; duplicate them -> 2
+	;
+	call	PREVAR			; game vars from live lost
+	call	PRESCR			; prepare screen
+	; start some music
+	mov	#1., R0			; music ID
+	mov	#C_CMD_MUSIC, R5	; start music command
+	call	CMDEXE
+	; go second stage
+	mov	#1., CURMOD
+	return
+
+
+; second stage - scroll field into view 
+MAINC1:	call	SCROLL			; set screen scroll ASAP to prevent teardowns (they CAN BE visible on real UKNC)
+	call	DRAWLB			; draw line
+	call	DRAWOB			; draw block objects
+	call	ROTATE			; one line of rotation
+        tst     SCROLY          	; are we at start?
+        bne     99$
+	call	CMDWAI			; PPU commands start waiting
+	call	DRAPLA
+	call	DRAFUE
+	call	CMDFIN			; PPU commands finish
+	call	DRASCO			; draw 00000 score
+	call	DRAHSC			; draw hiscore
+	call	DRALIV			; draw lives
+	mov     #2., CURMOD
+99$:	return
+
+
+; wait for SHIFT key
+MAINC2:	tst	KEYSHI
+	beq	10$
+	mov	#3., CURMOD
+10$:	return
+
+
+; play cycle
+MAINC3:	clr	SecondFrame
+	call	DrawScrollProc
+	tst	DoubleSpeed
+	beq	10$
+	inc	SecondFrame
+	call	DrawScrollProc
+10$:	; gameplay
+	call	PROCOB			; process objects moving etc.
+	call	PROFUE			; process fuel decrease
+	call	CHKPLA			; check plane collision vs land
+	call	PROMIS			; process missile
+	call	PROMI2			; missile vs objects
+	call	PROPL2			; plane vs objects
+	call	PlaneKeys		; process plane keys
+	clr	DoubleSpeed
+	tst	KeyUp
+	beq	20$
+	inc	DoubleSpeed
+20$:	return
+
+DrawScrollProc:
+	call	SCROLL			; it also contains CMDWAI
+	call	DRAWLB			; draw line first asap
+	; drawing & stuff in PPU
+	call	CMDWAI			; PPU commands start waiting
+	call	DRAPLA			; draw plane
+	tst	SecondFrame
+	bne	10$
+	call	DRAMIS			; draw missile
+10$:	call	DRAENP			; draw enemy planes
+	call	DRAFUE			; draw fuel gauge line
+	call	CMDFIN			; PPU commands finish
+	; drawing in CPU
+	call	DRAWOB			; draw block objects
+	call	DRASCO			; draw score if needed
+	; rotate
+	call	ROTATE			; one line of rotation
+	return
+
+
+; wait some after crash
+MAINC4:	inc	PlaneStatus
+	cmp	PlaneStatus, #128.
+	blo	99$
+	mov	#5., CURMOD
+99$:	return
+	
+; live lost - init last bridge variables or game over
+MAINC5:	dec	LIVES
+	ble	90$	
+        mov	RANSLO, RANS0L		; restore random (both)
+        mov	RANSLO, RANDLO	
+	mov	SLEVEL, LEVEL		; restore level
+	call	PREVAR			; game vars from live lost
+	call	PRESCR			; prepare screen
+	mov	#1., CURMOD		; second stage again
+	return
+90$:	call	DRALIV			; draw 0 lives
+	; TODO: draw game over
+	mov	#6., CURMOD
+	return
+        
+; game over wait for keypress and go to reset
+MAINC6:	tst	KEYSHI
+	beq	10$
+	clr	KEYSHI
+	clr	CURMOD
+	return
+10$:	tst	KEYSPC
+	beq	20$
+	clr	KEYSPC
+	clr	CURMOD
+20$:	return
+	
+
+; //////////////////////////////////////////////////////////////////////////////
+; // UTILS, DEBUG, ETC
+; //////////////////////////////////////////////////////////////////////////////
+
+; wait cycle
+WAITCY:	inc	WAICL0
+	tst	VSY1CN
+	beq	WAITCY
+	clr	VSY1CN
+	inc	FRAMCN
+	mov	WAICL0, WAICLC
+	clr	WAICL0
+	return
+
+; debug info
+DBGINF:	tst	DBGMOD
+	bne	1$
+	return
+1$:	bit	#^B1111, FRAMCN		; once in 16 frames
+	beq	2$
+	return
+2$:	mov	KEYCUR, R0		; pressed/released key
+	mov	#1., R1
+	mov	#4., R2
+	call	SPRBW4
+	mov	WAICLC, R0		; remaining wait cycles 
+	mov	#16., R1
+	mov	#4., R2
+	call	SPROW4
+	mov	WAIPPU, R0		; remaining PPU wait cycles 
+	mov	#21., R1
+	mov	#4., R2
+	call	SPROW4
+	return
+
+	
+; //////////////////////////////////////////////////////////////////////////////
+; // COMMON
+; //////////////////////////////////////////////////////////////////////////////
+
+; wait for queue complete
+CMDWAI:	tst	CMDBUF			; check commands buffer
+	bne	.-4			; still not ready
+	mov	#CMDBUF+2, CMDADR
+	return
+
+; ask PPU to process command buffer
+CMDFIN: clr	@CMDADR
+	mov	#1, CMDBUF
+	return
+	
+; add command to PPU queue, R5-command, R0..R4 params
+CMDA00:	.WORD	0
+CMDADD:	mov	R0, CMDA00		; save R0
+	mov	CMDADR, R0
+	mov	R5, (R0)+		; command
+	mov	CMDA00, (R0)+		; parameters
+	mov	R1, (R0)+
+	mov	R2, (R0)+
+	mov	R3, (R0)+
+	mov	R4, (R0)+
+	clr	(R0)			; next command is STOP
+	mov	R0, CMDADR
+	mov	CMDA00, R0		; restore R0
+	return
+
+; execute command in PPU, R5-command, R0..R4 params
+CMDEXE:	call	CMDWAI
+	call	CMDADD
+	call	CMDFIN
+	return
+
+; //////////////////////////////////////////////////////////////////////////////
+; // GAEMPLAY
+; //////////////////////////////////////////////////////////////////////////////
+
+; prepare screen
+PRESCR:	call	CLRSCR			; clear screen
+        call    CLRBLK          	; clear all objects
+	mov	#C_CMD_IFPREP, R5	; prepare interface (draw it)
+	call	CMDEXE
+	mov	#WCP00, R0		; draw fuel gauge
+	mov	#14., R1
+	mov	#36., R2
+	call	SPRITW
+	return
+
+; game vars from live lost 
+PREVAR:	mov     #223., SCROLY   	; scroll offset = last line
+	mov	#31., BLOCKY		; block line = last line
+	mov	#1., NEEDLN		; need to draw first line
+	clr	BLOCNT			; block counter = 0 (bridge)
+	mov	#20., NOFUEL		; blocks cnt to 100% make fuel
+	; reset start/end river bank sizes
+	mov	#15., BLNXT1
+	mov	#15., BLSTA1
+	mov	#15., BLEND1
+	clr	BLSTA2
+	clr	BLEND2
+	; plane 
+	mov	#151.-32.*256., PlaneX
+	clr	PlaneDir
+	clr	PlaneStatus
+	call	PlaneVelReset
+	clr	MISSLX
+	clr	MISSLY
+	mov	#<76.*16.>, FUEL
+	mov	#1., SCORED		; will draw score
+	return
+
+; key K1 - RGB / GRB switch
+RGBCHK:	tst	KEYK1
+	bne	10$
+	return
+10$:	clr	KEYK1
+	com	SETRGB	
+	bne	20$
+	mov	#^B1111101011111000, R0
+	mov	#^B1111111011111001, R1
+	mov	#^B0000000000010000, R2
+	mov	#^B0000000000010111, R3
+	br	30$
+20$:	mov	#^B1111110011111000, R0
+	mov	#^B1111111011111001, R1
+	mov	#^B0000000000010000, R2
+	mov	#^B0000000000010111, R3
+30$:	mov	#C_CMD_PALUPD, R5	; 03. - update palette & resolution
+	call	CMDEXE
+	return
+
+; key STOP - restart all
+STPCHK:	tst	KEYSTP
+	bne	10$
+	return
+10$:	clr	KEYSTP
+	clr	CURMOD
+	return
+
+; key K2 - debug on|off (and restart)
+KK2CHK:	tst	KEYK2
+	bne	10$
+	return
+10$:	clr	KEYK2
+	com	DBGMOD
+	clr	CURMOD
+	return
+
+; scroll screen 223..0
+SCROLL: mov     SCROLY, R0
+        mov     #C_CMD_SCROLL, R5	; 04. - scroll command
+        call    CMDEXE			; execute in PPU
+        return
+
+; rotate one line
+ROTATE:	tst	PlaneStatus		; do not slow rotation if plane is crashing
+	bne	8$
+	tst	KEYDWN			; need to slow rotation?
+	beq	8$
+	bit	#1, FRAMCN
+	beq	8$
+	return
+8$:	mov	#1., NEEDLN		; need to draw first line
+	dec	SCROLY			; decrease scrollline
+	dec	BLOCKY			; decrease blockline
+	blt	10$
+	return
+10$:	mov	#31., BLOCKY		; last block line
+	tst	SCROLY
+	bge	20$
+	mov	#223., SCROLY
+20$:	inc	BLOCNT
+	cmp	BLOCNT, #8.		; bridge flying by
+	bne	24$
+	mov	RANS0L, RANSLO		; now store this level random
+	mov	LEVEL, SLEVEL		; and store level
+24$:	cmp	BLOCNT, #16.
+	bge	30$
+	return
+30$:	; new level
+	mov	RANDLO, RANS0L		; 2-bytes random storing when bridge about to spawn
+	clr	BLOCNT			; 0th block
+	inc	LEVEL
+	cmp	LEVEL, #48.		; level++ (max is 48.)
+	blos	99$
+	mov	#47., LEVEL		; level switching 47/48
+99$:	return
+
+; clear all objects
+CLRBLK: mov     #BLOCKS, R0
+        mov     #<4.*8.>, R1		; 8x8 bytes
+        clr     (R0)+
+        sob     R1, .-2
+        return
+
+	
+; // check and make new block if needed //
+
+MAKEBL: cmp     BLOCKY, #31.		; do we need to create new block?
+	beq     10$			; bottom line of block - need to create it
+	return
+10$:	; move 7 blocks down
+	mov     #BLOCK7, R4		; R4-src, R5-dst
+	mov	#BLOCK8, R5
+	mov     #<4.*7.>, R3		; size in words
+20$:	mov	-(R4), -(R5)		; move 7 blocks down
+	sob	R3, 20$	
+	; only ONE random for each block
+	call	RANDOM	
+	;
+	; make a new block
+	;	
+	tst	BLOCNT			; is it a brodge?
+	bne	30$
+	; bridge block - new level
+	mov	#15., BLSTA1		; bridge have fixed start/end bank dx
+	mov	#15., BLEND1
+	clr	BLSTA2			; bridge have no island
+	clr	BLEND2
+	mov	RANDLO, BLNXT1		; store next block random bank size
+	bic	#^B1111111111110000, BLNXT1
+	; bridge object
+	mov	#BLOCKS, R5
+	movb	#08., (R5)+		; 08. - bridge
+	clrb	(R5)+			; direction (doesn't matter)
+	mov	#16., (R5)+		; bridge X/8
+	mov	SCROLY, R0
+	sub	#24., R0
+	movb	R0, (R5)+		; bridge Y (line number)
+	clrb	(R5)+			; moving = 0
+	clrb	(R5)+			; animation counter
+	clrb	(R5)			; reserved = 0
+	return				; object is created
+30$:
+	; block before bridge
+	cmp	BLOCNT, #15.
+	bne	40$
+	mov	BLSTA1, BLEND1		; create end from start of previous
+	mov	#15., BLSTA1		; fixed start (next will be bridge)
+	clr	BLSTA2			; no island
+	clr	BLEND2
+	call 	MAKEOB			; make object
+	return
+40$:	; straight section
+	bit	#1, LEVEL
+	beq	50$
+	mov	#5., BLSTA1
+	clr	BLSTA2			; no island
+	clr	BLEND2
+	call	MAKEOB
+	return
+50$:	; normal block
+	mov	BLSTA1, BLEND1		; connect river bank
+	mov	BLSTA2, BLEND2		; connect island
+	; do we need to change river bank?		
+	cmpb	RANDLO, #160.
+	blo	60$
+	mov	BLNXT1, BLSTA1		; change to next random width	
+	mov	RANDLO, BLNXT1
+	bic	#^B1111111111110000, BLNXT1
+60$:	; island sizes
+	; block before before bridge - end island
+	cmp	BLOCNT, #14.
+	bne	70$
+	clr	BLSTA2
+	br	90$
+70$:	; block 1 - no island at all
+	cmp	BLOCNT, #1
+	beq	90$
+	; 'normal' blocks island
+	; finish island if next block width is not enough
+	cmp	BLNXT1, #10.
+	blo	72$
+	clr	BLSTA2
+	br	90$
+72$:	; test current width
+	mov	BLSTA1, R1
+	mov	BLEND1, R2
+	call	GETMAX
+	cmp	R0, #10.
+	bhi	90$	
+	mov	#10., BLSTA2
+	sub	BLSTA1, BLSTA2
+	cmp	BLSTA2, #4.		; test for too wide island
+	blos	90$
+	mov	#4., BLSTA2
+90$:	; make object
+	call	MAKEOB
+	return
+
+
+; make first object
+MAKENL:	.WORD	MAKEO5, MAKEO6, MAKEO7, MAKEO5, MAKEO6, MAKEO7, MAKEO5, MAKEO5	; a bit more ships
+
+MAKEOB:	clr	BLOCKS			; clear obj ID
+	; first block is always a house
+	cmp	BLOCNT, #1
+	beq	MAKEHO
+	; we can't run for too long without fuel
+	dec	NOFUEL		
+	ble	MAKEFU
+	; use level difficulty
+	mov	#64., R0
+	sub	LEVEL, R0		; R0 = 0..64 max, 0..16 min
+	asl	R0			; R0 = 0..128 max, 0..32 min
+	cmpb	RANDHI, R0
+	bhi	MAKEEN			; make enemy
+	; check both bit 6 to make fuel
+	bitb	#^B01000000, RANDLO
+	beq	MAKEHO
+	bit	#^B01000000, R0
+	beq	MAKEHO
+	; make fuel after all
+MAKEFU:	mov	#20., NOFUEL
+	call	MAKEO4			; 04. - fuel
+	return
+MAKEHO:	call	MAKEO3			; 03. - house
+	return	
+MAKEEN:	movb	RANDHI, R0
+	bic	#^B1111111111111000, R0
+	cmp	LEVEL, #4.		; no planes until level 4
+	bhis	10$
+	bic	#^B1111111111111110, R0
+10$:	asl	R0
+	call	@MAKENL(R0)
+	return
+	
+
+; get 'in-water' X coord -> R0
+INW000:	.WORD	0	; object size in 8-pix
+INWATE:	; blocks 1 or 15. will use simplified random
+	cmp	BLOCNT, #15.		; block-15?
+	beq	4$
+	cmp	BLOCNT, #1.		; block-1?
+	beq	4$
+	bit	#1, LEVEL		; straight?
+	beq	8$
+	; straight blocks - random by table 
+	movb	RANDLO, R0
+	bic	#^B1111111111110000, R0
+	movb	RNDT1L(R0), R0		; upper byte = 0
+	return	
+4$:	; 1 or 15 block
+	movb	RANDLO, R0		; 0..255.
+	bic	#^B1111111111111001, R0
+	asr	R0			; 0..3
+	add	#17., R0
+	return
+8$:	; normal section - get water width
+	mov	R5, -(SP)		; wtf? we arent using R5 anyway
+	mov	BLSTA2, R1
+	mov	BLEND2, R2
+	call	GETMAX
+	mov	#20., R4
+	sub	R0, R4
+	mov	BLSTA1, R1
+	mov	BLEND1, R2
+	call	GETMAX
+	cmp	R0, #4.
+	bhis	20$
+	mov	#4., R0
+20$:					; water start -> R0
+	sub	R0, R4			; water width -> R4
+	; ship size = 5 (8-pix)
+	; heli size = 3
+	; fuel size = 2
+	cmp	R4, INW000		; can we place at all?
+	bhis	30$
+	; unable to place object
+	clr	R0
+	br	99$
+30$:	sub	INW000, R4		; placeable max rel x -> R4 (0..14 best case)
+	asl	R4
+	mov	RNDT0L(R4), R2		; table addr -> R2
+	; random
+	movb	RANDHI, R1
+	bic	#^B1111111111111000, R1	; 0..7
+	; random from table
+	add	R1, R2
+	movb	(R2), R1		; table random (0..14 best case)
+	add	R1, R0
+	; need to mirror placement?
+	bit	#^B00100000, RANDHI
+	bne	99$
+	mov	#40., R1
+	sub	R0, R1
+	sub	INW000, R1
+	mov	R1, R0
+99$:	mov	(SP)+, R5
+	return
+
+	
+; house
+MAKEO3:	mov	#BLOCKS, R5
+	movb	#03., (R5)+		; 03. - house ID
+	movb	RANDLO, R0
+	bic	#^B1111111111111110, R0
+	movb	R0, (R5)+		; +01 - direction
+	; get X coord
+	; can we use island?
+	mov	BLSTA2, R1
+	mov	BLEND2, R2
+	call	GETMIN
+	cmp	R0, #2			; must be 4*8 pix wide island
+	blo	20$
+	bitb	#4, RANDHI		; ~50% chance to put house in center
+	bne	20$
+	mov	#18., (R5)+		; house X in center
+	br	80$
+20$:	; use side placement
+	mov	BLSTA1, R1
+	mov	BLEND1, R2
+	call	GETMIN
+	mov	R0, R1
+	asr	R1
+	sub	#2, R1
+	bge	30$
+	clr	R1
+30$:	; maybe use other side?
+	bitb	#8., RANDHI
+	bne	40$
+	mov	#36., R0
+	sub	R1, R0
+	mov	R0, R1
+40$:	mov	R1, (R5)+		; house X on left side
+80$:	clrb	(R5)+			; house Y (line number, not used)
+	clrb	(R5)+			; moving = 0
+	clrb	(R5)+			; animation counter
+	clrb	(R5)			; reserved = 0	
+	return
+
+; fuel
+MAKEO4:	mov	#2., INW000		; fuel width in 8-pix
+	call	INWATE			; X*8 -> R0
+	tst	R0			; can't place?
+	bne	10$
+	clr	BLOCKS
+	return
+10$:	mov	#BLOCKS, R5
+	movb	#04., (R5)+		; 04. - fuel
+	clrb	(R5)+			; direction
+	mov	R0, (R5)+		; X coord
+	mov	SCROLY, R0
+	sub	#28., R0
+	movb	R0, (R5)+		; y line number
+	clrb	(R5)+			; moving = 0
+	clrb	(R5)+			; animation counter
+	clrb	(R5)			; reserved = 0	
+	return
+
+; ship
+MAKEO5:	mov	#5., INW000		; ship width = 5 (8-pix)
+	call	INWATE			; X*8 -> R0
+	tst	R0
+	bne	10$
+	clr	BLOCKS
+	return
+10$:	mov	#BLOCKS, R5
+	movb	#05., (R5)+		; 05. - ship
+	clrb	(R5)			; direction = 0
+	bitb	#^B01000000, RANDHI
+	beq	20$
+	movb	#1, (R5)		; direction = 1
+20$:	inc	R5
+	ash	#3, R0			; X*8
+	mov	R0, (R5)+		; X coord
+	mov	SCROLY, R0
+	sub	#20., R0		; = 16+(dy/2)
+	movb	R0, (R5)+		; y line number
+	movb	RANDLO, R0
+	bic	#^B1111111111100000, R0	; 0..31
+	add	#40., R0		; some tuning to delay
+	movb	R0, (R5)+		; moving delay
+	clrb	(R5)+			; animation counter
+	clrb	(R5)			; reserved 
+	return
+
+; helicopter
+MAKEO6:	mov	#3., INW000		; helicopter width = 3 (8-pix)
+	call	INWATE			; X*8 -> R0
+	tst	R0			; no place?
+	bne	10$
+	clr	BLOCKS			; delete
+	return
+10$:	mov	#BLOCKS, R5
+	movb	#06., (R5)+		; 06. - helicopter
+	clrb	(R5)			; direction = 0
+	bitb	#^B01000000, RANDHI
+	beq	20$
+	movb	#1, (R5)		; direction = 1
+20$:	inc	R5
+	ash	#3, R0			; X*8
+	mov	R0, (R5)+		; X coord
+	mov	SCROLY, R0
+	sub	#21., R0		; = 16+(dy/2)
+	movb	R0, (R5)+		; y line number
+	movb	RANDLO, R0
+	bic	#^B1111111111100000, R0	; 0..31
+	add	#40., R0		; some tuning to delay
+	movb	R0, (R5)+		; moving delay
+	clrb	(R5)+			; animation counter
+	clrb	(R5)			; reserved
+	return
+
+; plane
+MAKEO7:	mov	#BLOCKS, R5
+	movb	#07., (R5)+		; 07. - enemy plane
+	movb	#1, (R5)+		; direction (<-)
+	mov	#<320.-16.>, (R5)+	; X-coord
+	mov	SCROLY, R0
+	sub	#19., R0		; = 16+(dy/2)
+	movb	R0, (R5)+
+	movb	RANDLO, R0
+	bic	#^B1111111111100000, R0	; 0..31
+	add	#40., R0		; some tuning to delay
+	movb	R0, (R5)+		; moving delay
+	clrb	(R5)+			; animation counter
+	clrb	(R5)+
+	return
+
+; bridge
+MAKEO8:	clr	BLOCKS
+	return
+
+
+; move end to start
+MOVEND:	bit	#1., BLOCKY		; every 2 ticks
+	bne	1$
+	return
+1$:	cmp	BLEND1, BLSTA1
+	blo	10$
+	bhi	20$
+	br	30$
+10$:	inc	BLEND1
+	br	30$
+20$:	dec	BLEND1
+30$:	cmp	BLEND2, BLSTA2
+	blo	50$
+	bhi	60$
+	return
+50$:	inc	BLEND2
+	return
+60$:	dec	BLEND2
+	return
+
+
+; draw left bank (R4 - road color if needed)
+DRAWBK:	mov	BLEND1, R3
+	mov	R3, BLEND3
+	cmp	R3, #4.
+	bhis	10$
+	mov	#4., R3
+	mov	R3, BLEND3		; save overflown dx
+10$:	mov	R4, (R5)+
+        sob	R3, 10$
+	return
+	
+; draw water
+DRAWWT:	mov	#20., R3		; 20. - left bank - island = water width
+	sub	BLEND3, R3
+	sub	BLEND2, R3
+10$:	mov	#^B1111111100000000, (R5)+
+        sob	R3, 10$
+	return
+
+; draw island half
+DRAWIS:	mov	BLEND2, R3
+	beq	90$
+10$:	mov	#^B0000000011111111, (R5)+
+        sob	R3, 10$
+90$:	return
+
+
+; draw house line
+HOUSLN: mov	BLOCKY, R1
+	cmp	R1, #25.		; house lines are 06.-25. inside block
+	blos	10$
+	return
+10$:	cmp	R1, #6.
+	bhis	20$
+	return
+20$:	sub	#06., R1		; R1 = line inside house
+	mov	SCROLY, R2
+	add	#64., R2
+	asl	R2
+	mov	LINEAD(R2), R5		; R5 = vaddr
+	mov	@#<BLOCKS+2>, R0	; R5 = vaddr + house X
+	asl	R0
+	add	R0, R5
+	movb	@#<BLOCKS+1>, R0	; R0 = direction
+	; plane-1,2 drawing
+	asl	R0
+	mov	WSPRI3(R0), R0		; R0 = sprite addr
+	ash	#3, R1			; R1 = line num * 8 (4-words)
+	add	R1, R0			; R0 = line addr inside house sprite
+	mov	(R0)+, (R5)+
+	mov	(R0)+, (R5)+
+	mov	(R0)+, (R5)+
+	mov	(R0), (R5)
+	return
+
+
+; draw fuel line
+FUELIN:	mov	BLOCKY, R1
+	cmp	R1, #27.		; fuel lines are 04.-27. inside block
+	blos	10$
+	return
+10$:	cmp	R1, #04.
+	bhis	20$
+	return
+20$:	sub	#04., R1		; sprite line -> R1
+	mov	SCROLY, R2	
+	add	#64., R2
+	asl	R2
+	mov	LINEAD(R2), R5		; vaddr -> R5
+	mov	@#<BLOCKS+2>, R0	; X/8 coord
+	asl	R0
+	add	R0, R5			; vaddr+X -> R5
+	mov	#WCP40, R0
+	asl	R1
+	asl	R1			; sprite line * 3 (2-words)
+	add	R1, R0
+	mov	(R0)+, (R5)+
+	mov	(R0)+, (R5)
+	return
+	
+
+; draw first line of screen and objects
+DRAWLB:	tst	NEEDLN			; check if we need to draw anything
+	bne	2$
+	return
+2$:	clr	NEEDLN	
+	call    MAKEBL          	; try to make a new block
+	; R5 - to line vaddr
+	mov	SCROLY, R5
+	add	#64., R5
+	asl	R5
+	mov	LINEAD(R5), R5
+	; draw normal banks and river
+	mov	#^B0000000011111111, R4	; color = green
+	tst	BLOCNT			; need to draw road?
+	bne	10$
+	mov	BLOCKY, R4
+	asl	R4
+	mov	ROADCO(R4), R4		; get road color
+10$:	call	DRAWBK	; river left bank
+	call	DRAWWT	; draw water
+	call	DRAWIS	; draw island if needed
+	; mirror landscape to right side
+	call	DRAWIS
+	call	DRAWWT
+	call	DRAWBK		
+	; draw house line
+	cmpb	BLOCKS, #03.		; if it's a house in block 0
+	bne	40$
+	call	HOUSLN
+40$:	cmpb	BLOCKS, #04.		; if it's a fuel in block 0
+	bne	50$
+	call	FUELIN
+50$:	; move end to start
+	call	MOVEND
+	return
+
+
+; draw all objects
+;
+DRA000:	.WORD	0
+DRA003:	.WORD	0
+DRAWOB:	mov	#BLOCKS, DRA000
+	mov	#8., DRA003
+10$:	movb	@DRA000, R0
+	asl	R0
+	call	@DRAWOL(R0)
+	add	#8., DRA000
+	dec	DRA003
+	bne	10$
+	return
+
+; draw object proc table
+DRAWOL:	.WORD	DRAWO0, DRAWO1, DRAWO2, DRAWO3, DRAWO4, DRAWO5, DRAWO6, DRAWO7, DRAWO8
+; draw object explosion proc table
+DEXPOL:	.WORD	DEXPO0, DEXPO1, DEXPO2, DEXPO3, DEXPO4, DEXPO5, DEXPO6, DEXPO7, DEXPO8
+
+DRAWO0:	return
+
+; draw explosion
+DRAWO1:	mov	DRA000, R0
+	movb	1(R0), R5
+	asl	R5
+	call	@DEXPOL(R5)	
+	return
+
+DRAWO2:	return
+
+DRAWO3:	return
+
+DRAWO4:	return
+
+; draw ship
+DRAWO5:	mov	DRA000, R0		; block addr
+	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	mov	R1, R5
+	bic	#^B1111111111111000, R5	; X fine
+	asl	R5			; X fine * 2	
+	mov	WSP50L(R5), R4
+	tstb	1(R0)			; dir == 0?
+	beq	1$
+	mov	WSP51L(R5), R4		; use another sprites for direction
+1$:	mov	R2, R5
+	add	#64., R5
+	asl	R5
+	mov	LINEAD(R5), R5		; vaddr -> R5
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	asl	R1			; X coarse * 2
+	add	R1, R5			; add X/8 to vaddr
+	; draw 5 words x 8 lines
+	mov	#8., R3
+	; check if block-0
+	cmp	R0, #BLOCKS
+	bhi	10$
+	; block-0 must check for need to draw
+2$:	cmp	R2, SCROLY		; need to draw?
+	blt	3$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#72., R5
+	inc	R2
+	sob	R3, 2$
+	return
+3$:	add	#10., R4		; next line
+	add	#80., R5
+	inc	R2
+	sob	R3, 2$
+	return
+10$:	; check if not last block
+	cmp	R0, #BLOCK7
+	bhis	20$
+	; blocks 1..6 are drawing fully
+12$:	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#72., R5
+	sob	R3, 12$
+	return
+20$:	; last block are not drawing fully sometimes
+	cmp	R2, SCROLY
+	bge	90$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#72., R5
+	inc	R2
+	sob	R3, 20$
+90$:	return
+
+; draw helicopter
+DRAWO6:	mov	DRA000, R0		; block addr
+	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	; spr addr
+	clr	R4
+	bisb	6(R0), R4		; animation
+	asl	R4
+	bisb	1(R0), R4		; direction
+	asl	R4
+	mov	WSP60A(R4), R4		; get sprites tab adr -> R4
+	mov	R1, R5
+	bic	#^B1111111111111000, R5	; X fine
+	asl	R5			; X fine * 2
+	add	R5, R4
+	mov	(R4), R4		; sprite adr with preshift -> R4
+	; gat vaddr
+	mov	R2, R5
+	add	#64., R5
+	asl	R5
+	mov	LINEAD(R5), R5	; vaddr -> R5
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	asl	R1			; X coarse * 2
+	add	R1, R5			; add X/8 to vaddr
+	; draw 3 words x 10 lines
+	mov	#10., R3
+	; check if block-0
+	cmp	R0, #BLOCKS
+	bhi	10$
+	; block-0 must check for need to draw
+2$:	cmp	R2, SCROLY		; need to draw?
+	blt	3$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#76., R5
+	inc	R2
+	sob	R3, 2$
+	return
+3$:	add	#6., R4			; next line
+	add	#80., R5
+	inc	R2
+	sob	R3, 2$
+	return
+10$:	; check if not last block
+	cmp	R0, #BLOCK7
+	bhis	20$
+	; blocks 1..6 are drawing fully
+12$:	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#76., R5
+	sob	R3, 12$
+	return
+20$:	; last block are not drawing fully sometimes
+	cmp	R2, SCROLY
+	bge	90$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#76., R5
+	inc	R2
+	sob	R3, 20$
+90$:	return
+
+DRAWO7:	return
+
+DRAWO8:	return
+
+
+DEXPO0:	return
+DEXPO1:	return
+DEXPO2:	return
+DEXPO3:	return
+
+; fuel explosion draw
+DEXPO4:	mov	DRA000, R0		; block addr
+	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	; get spr addr
+	mov	#WCP41, R4
+	cmpb	6(R0), #6.		; animation delays (TODO: need to measure by frame on atari)
+	blt	1$
+	mov	#WCP42, R4
+	cmpb	6(R0), #24.
+	blt	1$
+	mov	#WCP41, R4
+	cmpb	6(R0), #31.
+	blt	1$
+	mov	#WCPBLU, R4
+1$:	; get vaddr
+	mov	R2, R5
+	add	#65., R5		; (!!!) YES, NOT 64. (!!!) correction is needed by 1 line exclusively for fuel
+	asl	R5
+	mov	LINEAD(R5), R5
+	asl	R1			; X * 2 (fuel X already X*8)
+	add	R1, R5			; vaddr -> R5
+	; draw 2 words x 24 lines
+	mov	#24., R3
+	; check if block-0
+	cmp	R0, #BLOCKS
+	bhi	10$
+	; block-0 must check for need to draw
+2$:	cmp	R2, SCROLY		; need to draw?
+	blt	3$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)
+	add	#78., R5
+	inc	R2
+	sob	R3, 2$
+	return
+3$:	add	#4., R4			; next line
+	add	#80., R5
+	inc	R2
+	sob	R3, 2$
+	return
+10$:	; check if not last block
+	cmp	R0, #BLOCK7
+	bhis	20$
+	; blocks 1..6 are drawing fully
+12$:	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)
+	add	#78., R5
+	sob	R3, 12$
+	return
+20$:	; last block are not drawing fully sometimes
+	; do not draw it for fuel.. sometimes it's a bug here
+;	cmp	R2, SCROLY
+;	bge	90$
+;	mov	(R4)+, (R5)+		; draw line
+;	mov	(R4)+, (R5)
+;	add	#78., R5
+;	inc	R2
+;	sob	R3, 20$
+90$:	return
+
+; ship explosion draw
+DEXPO5:	mov	DRA000, R0		; block addr
+	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	; get spr addr
+	cmpb	6(R0), #31.		; end of animation?
+	blt	1$
+	mov	#WCPBLU, R4		; just blue water
+	br	5$
+1$:	mov	#WSPL12, R4		; explosion 0 table
+	cmpb	6(R0), #6.
+	blt	2$
+	mov	#WSPL13, R4		; explosion 1 table
+	cmpb	6(R0), #24.
+	blt	2$
+	mov	#WSPL12, R4		; again explosion 0 table
+2$:	; use preshift
+	mov	R1, R5
+	bic	#^B1111111111111000, R5	; X fine
+	asl	R5			; X fine * 2
+	add	R5, R4
+	mov	(R4), R4		; sprite adr with preshift -> R4
+	; get vaddr
+5$:	mov	R2, R5
+	add	#64., R5
+	asl	R5
+	mov	LINEAD(R5), R5		; vaddr -> R5
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	asl	R1			; X coarse * 2
+	add	R1, R5			; add X/8 to vaddr
+	; draw 5 words x 8 lines
+	mov	#8., R3
+	; check if block-0
+	cmp	R0, #BLOCKS
+	bhi	10$
+	; block-0 must check for need to draw
+7$:	cmp	R2, SCROLY		; need to draw?
+	blt	8$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#72., R5
+	inc	R2
+	sob	R3, 7$
+	return
+8$:	add	#10., R4		; sprite next line
+	add	#80., R5		; vaddr next line
+	inc	R2
+	sob	R3, 7$
+	return
+10$:	; check if not last block
+	cmp	R0, #BLOCK7
+	bhis	20$
+	; blocks 1..6 are drawing fully
+12$:	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#72., R5
+	sob	R3, 12$
+	return
+20$:	; last block are not drawing fully sometimes
+	cmp	R2, SCROLY
+	bge	90$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#72., R5
+	inc	R2
+	sob	R3, 20$
+90$:	return
+
+; helicopter explosion draw
+DEXPO6:	mov	DRA000, R0		; block addr
+	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	; get spr addr
+	cmpb	6(R0), #31.		; end of animation?
+	blt	1$
+	mov	#WCPBLU, R4		; just blue water
+	br	5$
+1$:	mov	#WSPL10, R4		; explosion 0 table
+	cmpb	6(R0), #6.
+	blt	2$
+	mov	#WSPL11, R4		; explosion 1 table
+	cmpb	6(R0), #24.
+	blt	2$
+	mov	#WSPL10, R4		; again explosion 0 table
+2$:	; use preshift
+	mov	R1, R5
+	bic	#^B1111111111111000, R5	; X fine
+	asl	R5			; X fine * 2
+	add	R5, R4
+	mov	(R4), R4		; sprite adr with preshift -> R4
+	; get vaddr
+5$:	mov	R2, R5
+	add	#64., R5
+	asl	R5
+	mov	LINEAD(R5), R5		; vaddr -> R5
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	asl	R1			; X coarse * 2
+	add	R1, R5			; add X/8 to vaddr
+	; draw 3 words x 10 lines
+	mov	#10., R3
+	; check if block-0
+	cmp	R0, #BLOCKS
+	bhi	10$
+	; block-0 must check for need to draw
+7$:	cmp	R2, SCROLY		; need to draw?
+	blt	8$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#76., R5
+	inc	R2
+	sob	R3, 7$
+	return
+8$:	add	#6., R4			; next line
+	add	#80., R5
+	inc	R2
+	sob	R3, 7$
+	return
+10$:	; check if not last block
+	cmp	R0, #BLOCK7
+	bhis	20$
+	; blocks 1..6 are drawing fully
+12$:	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#76., R5
+	sob	R3, 12$
+	return
+20$:	; last block are not drawing fully sometimes
+	cmp	R2, SCROLY
+	bge	90$
+	mov	(R4)+, (R5)+		; draw line
+	mov	(R4)+, (R5)+
+	mov	(R4)+, (R5)
+	add	#76., R5
+	inc	R2
+	sob	R3, 20$
+90$:	return
+
+DEXPO7:	return
+DEXPO8:	return
+
+
+; process all objects
+;
+PRO000:	.WORD	0
+PRO003:	.WORD	0
+PROCOB:	tst	BOOMCN			; also decrease boom counter here
+	ble	2$
+	dec	BOOMCN
+2$:	mov	#BLOCKS, PRO000
+	mov	#8., PRO003
+10$:
+
+;	; + DEBUG
+;	cmp	PRO000, #BLOCKS
+;	bne	20$
+;	cmp	BLOCKY, #21.
+;	bne	20$
+;	
+;	movb	@PRO000, R5		; ex-object type
+;	cmp	R5, #4.
+;	blt	20$
+;	
+;	mov	PRO000, R0
+;	movb	0(R0), R1		; save object ID -> R1
+;	movb	#1, 0(R0)		; 1.- explosion
+;	movb	R5, 1(R0)		; dir = explosion type
+;	clrb	6(R0)			; animation counter
+;	br	30$
+;20$:	; - DEBUG
+	movb	@PRO000, R0
+	asl	R0
+	call	@PROCOL(R0)		; process movement and animation
+30$:	add	#8., PRO000
+	dec	PRO003
+	bne	10$
+	return
+
+PROCOL:	.WORD	PROCO0, PROCO1, PROCO2, PROCO3, PROCO4, PROCO5, PROCO6, PROCO7, PROCO8
+
+PROCO0:	return
+
+; explosion processing
+PROCO1:	mov	PRO000, R0	
+	incb	6(R0)
+	cmpb	6(R0), #31.		; max animation for explosion (0..31)
+	bgt	10$
+	return
+10$:	clrb	(R0)			; delete object
+	return
+	
+PROCO2:	return
+PROCO3:	return
+PROCO4:	return
+
+; ship processing
+PROCO5:	; are we moving already?
+	mov	PRO000, R0
+	tstb	5(R0)
+	beq	10$
+	decb	5(R0)	
+	return
+10$:	; get next moving coord
+	tstb	1(R0)			; is it right direction?
+	bne	50$
+	; do we need to check? (7th fine coord - check)
+	mov	2(R0), R1		; X
+	inc	R1
+	bit	#^B111, R1		; next X-fine is 0?
+	bne	20$			; no, move right
+	; else check
+	mov	#10., R4 		; +5 words
+	call	CHKGRE			; check green
+	bcc	20$			; can move
+	movb	#1, 1(R0) 		; .. or reverse direction to left
+	return
+20$:	inc	2(R0)			; inc X
+	return
+50$:	; moving left - do we need to check? (0th fine coord - check)
+	mov	2(R0), R1
+	bit	#^B111, R1		; current X-fine is 0?
+	bne	60$			; no, move left	
+	; else check left
+	mov	#-2, R4			; -1 word
+	call	CHKGRE			; check green
+	bcc	60$
+	clrb	1(R0)			; reverse direction to the right
+	return
+60$:	dec	2(R0)			; dec X
+	return
+	
+; check for river bank
+; it's not really OK, ship is smaller than helicopter, but i am lazy
+; TODO: need to store object y-line vaddr instead to not always compute it
+CHKGRE:	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	add	#64., R2
+	asl	R2
+	mov	LINEAD(R2), R2		; vaddr -> R2
+	mov	2(R0), R1		; X coord
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	asl	R1			; X coarse * 2
+	add	R1, R2			; add X/8 words to vaddr
+	add	R4, R2			; add to check right or left side
+	mov	#8., R3
+10$:	tstb	(R2)			; check green color
+	bne	80$
+	add	#80., R2
+	sob	R3, 10$
+	clc				; it's no green there
+	return
+80$:	sec				; was green
+	return
+	
+; helicopter processing
+PROCO6:	; are we moving already?
+	mov	PRO000, R0
+	tstb	5(R0)
+	beq	10$
+	decb	5(R0)	
+	br	90$
+10$:	; get next moving coord
+	tstb	1(R0)			; test direction
+	bne	50$
+	; do we need to check? (7th fine coord - check)
+	mov	2(R0), R1		; X
+	inc	R1
+	bit	#^B111, R1		; next X-fine is 0?
+	bne	20$			; no, move right
+	; else check
+	mov	#6., R4 		; +3 words
+	call	CHKGRE			; check green
+	bcc	20$			; can move
+	movb	#1, 1(R0) 		; reverse direction to left
+	br	90$
+20$:	inc	2(R0)			; inc X
+	br	90$
+50$:	; moving left - do we need to check? (0th fine coord - check)
+	mov	2(R0), R1
+	bit	#^B111, R1		; current X-fine is 0?
+	bne	60$			; no, move left	
+	; else check left
+	mov	#-2, R4			; -1 word
+	call	CHKGRE			; check green
+	bcc	60$
+	clrb	1(R0)			; reverse direction to the right
+	br	90$
+60$:	dec	2(R0)			; dec X
+90$:	; animation 1<>0
+	movb	6(R0), R1
+	com	R1
+	bic	#^B1111111111111110, R1
+	movb	R1, 6(R0)
+	return
+
+; enemy plane processing
+PROCO7:	; are we moving already
+	mov	PRO000, R0
+	cmpb	5(R0), #1	
+	blos	10$
+	decb	5(R0)
+	return
+10$:	; timer <= 1
+	blo	20$		
+	; timer == 1 - spawn plane
+	mov	#<320.-16.>, 2(R0)
+	decb	5(R0)			; set timer to 0
+	return
+20$:	; timer == 0 - fly to the left
+	tst	2(R0)			; X == 0 ?
+	bne	30$
+	movb	#16., 5(R0)		; X-coord == 0 - set timer again
+	return
+30$:	dec	2(R0)
+	dec	2(R0)
+	return
+
+PROCO8:	return
+
+
+; draw plane 
+DRAPLA:	; save bounding box
+	mov	PlaneX, R0
+	clrb	R0
+	swab	R0
+	add	#32., R0
+	add	#2., R0
+	mov	R0, PLANX1
+	add	#13., R0
+	mov	R0, PLANX2
+	; Y-line
+	mov	SCROLY, R2
+	sub	#28., R2		; 44
+	bge	2$
+	add	#224., R2
+2$:	mov	R2, PlaneY
+	add	#64., R2
+	mov	PlaneDir, R0
+	; if we are exploding already
+	tst	PlaneStatus
+	beq	10$
+	mov	#3., R0			; explosion 1
+	cmp	PlaneStatus, #11.
+	ble	10$
+	mov	#4., R0
+	cmp	PlaneStatus, #24.
+	ble	10$
+	mov	#3., R0			; explosion 1
+	cmp	PlaneStatus, #30.
+	ble	10$
+	mov	#5., R0			; clear plane
+	cmp	PlaneStatus, #32.	; don't need to draw at all - already exploded
+	ble	10$
+	return
+10$:	mov	PlaneX, R1		; it's float (!)
+	clrb	R1
+	swab	R1
+	add	#32., R1
+	mov	#06., R5		; 06. - draw plane (R0-dir, R1-X, R2-Y)
+	call	CMDADD
+	return
+
+
+; draw missile
+DRAMIS:	tst	MISSLX
+	bne	10$
+	return
+10$:	mov	MISSLX, R1
+	mov	MISSLY, R2
+	mov	#C_CMD_DRAMIS, R5	; 07. - draw missile
+	call	CMDADD
+	cmp	MISSLY, #50.		; need to clear previous missile if not in first position
+	beq	99$
+	mov	#C_CMD_CLEAMIS, R5	; 08. - clear previous missile
+	call	CMDADD
+99$:	return
+
+
+; draw enemy planes
+DRAENP:	mov	#BLOCKS, DRA000
+	mov	#8., DRA003
+10$:	mov	DRA000, R0
+	cmpb	(R0), #07.		; 07. - enemy plane
+	bne	20$
+	call	DRAEP0
+	br	80$
+20$:	; also check if plane exploding
+	cmpb	(R0), #01.		; 01. - explosion
+	bne	80$
+	cmpb	1(R0), #07.		; is it plane exploding?
+	bne	80$
+	call	DRAEX0
+80$:	add	#8., DRA000
+	dec	DRA003
+	bne	10$
+	return
+
+DRAEP0:	mov	DRA000, R0		; block addr
+	tstb	5(R0)			; check timer, do we need to draw at all?
+	beq	10$
+	return
+10$:	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	mov	#6., R3			; lines to draw
+	; if it's a block #7 - we don't need to draw (fully) sometimes
+	cmp	DRA000, #BLOCK7
+	bne	20$
+	mov	SCROLY, R3		; compute lines to draw
+	sub	R2, R3			; R3 - lines to draw, negative - do not draw
+	ble	90$			; plane is completely out?
+	cmp	R3, #6.			; plane is 6 lines in height
+	ble	20$
+	mov	#6., R3
+20$:	add	#64., R2
+	asl	R2
+	mov	LINEAD(R2), R2		; vaddr -> R2
+	clc
+	ror	R2			; vaddr in PPU = vaddr in CPU / 2
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	add	R1, R2			; add X/8 to vaddr
+	mov	2(R0), R1		; X again
+	mov	#10., R5		; 10. - draw enemy plane
+	call	CMDADD
+	return
+90$:	clrb	(R0)			; remove plane
+	return
+
+; draw enemy plane explosion
+DRAEX0:	mov	DRA000, R0		; block addr
+	mov	2(R0), R1		; X coord
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y line
+	mov	#6., R3			; lines to draw
+	; if it's a block #7 - we don't need to draw (fully) sometimes
+	cmp	DRA000, #BLOCK7
+	bne	20$
+	mov	SCROLY, R3		; compute lines to draw
+	sub	R2, R3			; R3 - lines to draw, negative - do not draw
+	ble	90$			; explosion is completely out?
+	cmp	R3, #6.			; explosion is 6 lines in height
+	ble	20$
+	mov	#6., R3
+20$:	add	#64., R2
+	asl	R2
+	mov	LINEAD(R2), R2		; vaddr -> R2
+	clc
+	ror	R2			; vaddr in PPU = vaddr in CPU / 2
+	asr	R1
+	asr	R1
+	asr	R1			; X coarse
+	add	R1, R2			; add X/8 to vaddr
+	mov	2(R0), R1		; X again
+	movb	6(R0), R5		; animation counter
+	bic	#^B1111111100000000, R5	; just in case (don't need this though)
+	cmp	R5, #6.
+	bgt	72$
+	clr	R0
+	br	80$
+72$:	cmp	R5, #24.
+	bgt	74$
+	mov	#1, R0
+	br	80$
+74$:	cmp	R5, #31.
+	bge	76$
+	clr	R0
+	br	80$
+76$:	clr	R1			; clear explosion	
+80$:	mov	#11., R5		; 11. - draw enemy plane explosion
+	call	CMDADD
+	return
+90$:	clrb	(R0)			; remove explosion as it completely out
+	return
+
+
+; get missile vaddr and lines to vaddr break
+MISCOR:	mov	SCROLY, R5
+	sub	MISSLY, R5
+	add	#64., R5
+5$:	cmp	R5, #64.
+	bge	10$
+	add	#224., R5
+	br	5$
+10$:	cmp	R5, #288.
+	blt	12$
+	sub	#288., R5
+	br	10$
+12$:	; R5 = Y-coord
+	mov	#288., R3
+	sub	R5, R3			; R3 - lines to cross vaddr boundary
+	asl	R5
+	mov	LINEAD(R5), R5
+	mov	MISSLX, R4
+	ash	#-3., R4		; R4 = X-coarse
+	asl	R4
+	add	R4, R5			; vaddr -> R5
+	return
+	
+	
+; check missile hits green color only
+; R5 - vaddr, R3 - lines to vaddr boundary
+; TODO: it's not testing first pixel, it's not testing rightmost line if X-fine is 7
+MISCHB:	mov	#5., R2			; 5 lines to test
+20$:	cmp	#^B0000000011111111, (R5)
+	bne	24$
+	; got green only
+	sec
+	return
+24$:	; + need to test for maximal vadr and loop to line-64
+	dec	R3
+	beq	30$
+	; +
+	add	#80., R5
+	sob	R2, 20$
+	clc
+	return
+30$:	sub	#42660, R5		; (288-64)*80 - 80
+	sob	R2, 20$
+	clc
+	return
+
+
+; process missile
+PROMIS:	tst	MISSLX
+	bne	10$
+	return
+10$:	cmp	MISSLX, #1.		; is it about to destruct?
+	beq	20$
+	add	#6., MISSLY
+	tst	DoubleSpeed
+	beq	12$
+	inc	MisslY
+12$:	cmp	MISSLY, #228.
+	bge	30$
+	; check if missile hits river banks
+	call	MISCOR			; R5 <- vaddr, R3 <- lines to vaddr break
+	call	MISCHB			; check for green color on course
+	bcs	30$			; hit river bank?
+	return
+20$:	clr	MISSLX
+	return
+30$:	mov	#1., MISSLX		; missile is about to destruct
+	return
+	
+
+; process missile 2 - check if it's hit something
+; 
+PROMI2:	cmp	MISSLX, #1.		; do not process empty or about to destruct
+	bgt	10$
+	return
+10$:	; walk through blocks
+	mov	#BLOCKS, PRO000
+	mov	#7., PRO003		; just 7 blocks, don't need to process last one
+20$:	cmpb	@PRO000, #4.		; don't need to process lower than fuel
+	blo	90$
+	call	OBJCOO			; get obj coords R1,R2,R3,R4 = X1,Y1,X2,Y2
+	cmp	MISSLX, R1
+	blt	90$
+	cmp	MISSLX, R3
+	bgt	90$
+	; test 2 missile points
+	mov	SCROLY, R0
+	sub	MISSLY, R0
+	bge	30$
+	add	#224., R0
+30$:	; compare point Y+0
+	call	PROMI3			
+	bcs	80$
+	mov	SCROLY, R0
+	sub	MISSLY, R0
+	add	#3., R0			; add 3 to Y
+	bge	40$
+	add	#224., R0
+	; compare point Y+3 to be sure (missile is moving by 6+1 pixels, enemy plane is 6-pix)
+40$:	call	PROMI3
+	bcc	90$
+80$:	; got our object
+	mov	#1, MISSLX		; prepare to destroy missile
+	mov	PRO000, R0
+	movb	0(R0), R1		; save object ID -> R1
+	movb	#1, 0(R0)		; 1.- explosion
+	movb	R1, 1(R0)		; dir = explosion type (ex-object type)
+	clrb	6(R0)			; animation counter
+	; add score (if not debug)
+	tst	DBGMOD
+	bne	88$
+	asl	R1
+	add	SCOTBL(R1), SCORE
+	inc	SCORED			; set 'draw score' flag
+88$:	; boom sound
+	mov	#2., R0			; sound ID - boom
+	mov	#C_CMD_SOUND, R5	; start sound command
+	call	CMDEXE	
+	mov	#32., BOOMCN		; counter to prevent create missile sound (boom have more priority)
+	return
+	;
+90$:	add	#8., PRO000
+	dec	PRO003
+	bne	20$
+	return
+
+; compare missile Y-point, R0-Y, compare to [R2..R4]
+PROMI3:	cmp	R0, R2
+	blt	10$
+	cmp	R0, R4
+	bgt	10$
+	sec
+	return
+10$:	clc
+	return
+
+; process plane 2 - check if it hits objects
+; 
+PROPL2:	tst	PlaneStatus		; do not check already exploding plane
+	beq	10$
+	inc	PlaneStatus		; increase animation and waiting count
+	cmp	PlaneStatus, #32.
+	bge	8$
+	return
+8$:	mov	#4., CURMOD		; next game mode
+	return
+10$:	; analyze blocks 6,7 (last ones)
+	mov	#BLOCK6, PRO000
+	mov	#2., PRO003
+20$:	cmpb	@PRO000, #4.		; don't need to process lower than fuel
+	blo	90$
+	call	OBJCOO			; get obj coords R1,R2,R3,R4 = X1,Y1,X2,Y2
+	cmp	PLANX2, R1		; check X1,X2 in range
+	blt	90$
+	cmp	PLANX1, R3
+	bgt	90$
+	; cycle 4 times by +3 pixels for Y line
+	mov	PlaneY, TEMPR0
+	mov	#4., TEMPR3		; not really correct because plane is 14px in height, but ok
+30$:	mov	TEMPR0, R0
+	call	PROMI3			; check R0 in [R2..R4] range
+	bcs	80$
+	add	#3., TEMPR0
+	cmp	TEMPR0, #224.		; check for lines boundary
+	blt	40$
+	sub	#224., TEMPR0
+40$:	dec	TEMPR3
+	bne	30$
+	br	90$	
+80$:	; got our object
+	cmpb	@PRO000, #4.		; is it a fuel?
+	bne	84$
+	inc	FUELD			; set flag to draw fuel line
+	add	#16., FUEL
+	cmp	FUEL, #<76.*16.>	; is it enough fuel?
+	bgt	82$
+	; sound - fuel
+	bit	#^B111, FRAMCN
+	beq	81$
+	return
+81$:	mov	#3., R0
+	mov	#C_CMD_SOUND, R5
+	call	CMDEXE
+	return
+82$:	mov	#<76.*16.>, FUEL	; overfueled
+	; sound - fuel is full
+	bit	#^B111, FRAMCN
+	beq	83$
+	return
+83$:	mov	#4., R0
+	mov	#C_CMD_SOUND, R5
+	call	CMDEXE
+	return
+84$:	; explode object
+	mov	PRO000, R0
+	movb	0(R0), R1		; save object ID -> R1
+	movb	#1, 0(R0)		; 1.- explosion
+	movb	R1, 1(R0)		; dir = explosion type (ex-object ID)
+	clrb	6(R0)			; animation counter
+	; add score and explode plane (if not debug)
+	tst	DBGMOD
+	bne	88$
+	asl	R1
+	add	SCOTBL(R1), SCORE
+	inc	SCORED			; set 'draw score' flag
+	mov	#1, PlaneStatus		; =1 set plane to 'crashing'
+88$:	; boom sound
+	mov	#2., R0			; sound ID - boom
+	mov	#C_CMD_SOUND, R5	; start sound command
+	call	CMDEXE
+	mov	#32., BOOMCN		; counter to prevent create missile sound (boom have more priority)
+	return
+	;
+90$:	add	#8., PRO000
+	dec	PRO003
+	bne	20$
+	return
+
+
+; check for one plane line of green (for plane collision with ground)
+; btw, wtf? is it a plane or a boat? how it can crash onto ground, ships and helicopters?
+; R1-X
+CHKPLL:	mov	PLANEY, R2	
+	add	#64., R2		; Y-line to display line
+	asl	R2
+	mov	LINEAD(R2), R5
+	asr	R1
+	asr	R1
+	asr	R1
+	asl	R1
+	add	R1, R5			; R5 - vaddr
+	mov	#224., R3
+	sub	PLANEY, R3		; R3 - lines to vaddr boundary
+	mov	#12., R2		; R2 - 12 lines - plane height	
+20$:	cmp	#^B0000000011111111, (R5)
+	bne	24$
+	; got green only
+	sec
+	return
+24$:	; + need to test for maximal vadr and loop to line-64
+	dec	R3
+	beq	30$
+	; +
+	add	#80., R5
+	sob	R2, 20$
+	clc
+	return
+30$:	sub	#42660, R5		; (288-64)*80 - 80
+	sob	R2, 20$
+	clc
+	return
+
+; check for plane collision with green land
+;
+CHKPLA:	tst	PlaneStatus		; is plane crashing already?
+	bne	99$
+	tst	DBGMOD			; debugging?
+	bne	99$
+	mov	PLANX1, R1
+	inc	R1			; fine tuning X1 a bit (making plane thinner)
+	call	CHKPLL
+	bcs	80$
+	mov	PLANX2, R1
+	dec	R1			; fine tuning X2
+	call	CHKPLL
+	bcs	80$
+	return
+80$:	; collided
+	mov	#1, PlaneStatus		; set plane status to 'crashing'
+	; boom sound
+	mov	#2., R0			; sound ID - boom
+	mov	#C_CMD_SOUND, R5	; start sound command
+	call	CMDEXE	
+99$:	return
+	
+
+; objects DX and DY in pixels-1
+OBJDX:	.WORD	0, 0, 0, 0, 15., 31., 15., 15., 100.
+OBJDY:	.WORD	0, 0, 0, 0, 23.,  7.,  9.,  5., 24.
+
+; get object COORDS from @PRO000 = block addr
+; -> R1,R2,R3,R4 = X1,Y1,X2,Y2
+OBJCOO:	mov	PRO000, R0
+	mov	2(R0), R1		; X1
+	movb	4(R0), R2
+	bic	#^B1111111100000000, R2	; Y1
+	; fuel
+	cmpb	(R0), #4.
+	bne	10$
+	asl	R1			; *8, fuel is 8-pix aligned
+	asl	R1
+	asl	R1
+10$:	mov	R1, R3
+	mov	R2, R4
+	movb	(R0), R0		; not needed to clear high byte
+	asl	R0
+	add	OBJDX(R0), R3
+	add	OBJDY(R0), R4
+	return
+
+
+; process keypresses
+PlaneKeys:
+	; plane is crashing?
+	tst	PlaneStatus		; plane is crashing - don't process keys
+	beq	10$
+	return
+10$:	; key shift - fire missile
+	tst	KEYSHI
+	beq	20$
+	tst	MISSLX			; test for missile already present
+	bne	20$
+	; create missile
+	mov	PlaneX, R0		; PlaneX is float (!) [int][frac]
+	clrb	R0
+	swab	R0
+	add	#40., R0		; 32. left margin + 8. plane half-width
+	mov	R0, MisslX
+	mov	#40., MisslY
+	; firing sound
+	tst	BOOMCN			; boom have more priority so check if it's counter still >0
+	bgt	20$
+	mov	#1., R0			; sound ID - fire
+	mov	#C_CMD_SOUND, R5	; start sound command
+	call	CMDEXE	
+20$:	; right
+	tst	KeyRht
+	beq	30$
+	mov	#2, PlaneDir		; moving right sprite
+	add	PlaneVel, PlaneX
+	cmp	PlaneX, #255.-16.*256.
+	blos	PlaneVelInc
+	mov	#255.-16.*256., PlaneX
+	br	PlaneVelInc
+30$:	; left
+	tst	KeyLft
+	beq	40$
+	mov	#1, PlaneDir
+	sub	PlaneVel, PlaneX
+	bcc	PlaneVelInc
+	clr	PlaneX
+	br	PlaneVelInc
+40$:	; no left or right - reset plane moving
+PlaneVelReset:
+	clr	PlaneDir
+	mov	#C_PLAVEL_MIN, PlaneVel
+	mov	#C_PLADVEL_MIN, PlaneDVel
+	return
+PlaneVelInc:
+	add	PlaneDVel, PlaneVel
+	cmp	PlaneVel, #3.*256.
+	blos	99$
+	mov	#3.*256., PlaneVel
+99$:	return
+
+
+; draw fuel line
+;
+DRAFUE:	tst	FUELD			; need to draw?
+	bne	10$
+	bit	#^B1111, FUEL		; still need to draw? (only drawing 1 of 16 to save time)
+	beq	10$
+	return
+10$:	clr	FUELD
+	mov	FUEL, R0
+	mov	#118., R1	
+	ash	#-4, R0
+	add	R0, R1
+	mov	#42., R2
+	mov	#09., R5		; 09. - draw fuel
+	call	CMDADD
+	return
+
+
+; decrease fuel
+;
+PROFUE:	tst	FUEL
+	beq	90$
+	dec	FUEL
+	return
+90$:	tst	DBGMOD			; debugging?
+	bne	99$
+	tst	PlaneStatus		; already lost?
+	bne	99$
+	mov	#1, PlaneStatus		; set 'crashing' plane state
+	; boom sound
+	mov	#2., R0			; sound ID - boom
+	mov	#C_CMD_SOUND, R5	; start sound command
+	call	CMDEXE	
+99$:	return
+
+
+; draw score
+DRASCO:	tst	SCORED
+	bne	10$
+	return
+10$:	clr	SCORED
+	cmp	SCORE, #60000.
+	blos	20$
+	mov	#60000., SCORE		; max score number
+	; TODO: in original game maximal score number means end of the game
+20$:	movb	#301, SPRD04		; color byte - green
+	mov	SCORE, R0
+	mov	#14., R1
+	mov	#21., R2
+	call	SPRDWO
+	return
+
+; draw hiscore
+DRAHSC:	movb	#303, SPRD04		; color byte - yellow
+	mov	HSCORE, R0
+	mov	#21., R1
+	mov	#21., R2
+	call	SPRDWO
+	return
+
+; draw lives
+DRALIV:	mov	LIVES, R0
+	mov	#27., R1
+	mov	#44., R2
+	call	SPRDDO
+	return
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // DRAWING, PRINT ETC
+; //////////////////////////////////////////////////////////////////////////////
+
+; planes 1 & 2 sprite
+; R0-spr addr, R1-x, R2-y
+SPRITW:	asl	R2
+	mov	LINEAD(R2), R5		; vaddr by y
+	asl	R1
+	add	R1, R5			; add x to vaddr
+	mov	-4(R0), R1		; dx
+	mov	-2(R0), R3		; dy
+	mov	#40., R4
+	sub	R1, R4
+	asl	R4			; addition to next line
+10$:	mov	R1, R2
+20$:	mov	(R0)+, (R5)+
+	sob	R2, 20$
+	add	R4, R5
+	sob	R3, 10$
+	return	
+
+; binary word print
+; R0 - word, R1, R2 - x*8, y
+SPRBW4:	asl	R2
+	mov	LINEAD(R2),R2
+	asl	R1
+	add	R1, R2			; vaddr -> R2
+	; clearing vaddr
+	mov	R2, R5
+	mov	#5., R3
+12$:	mov	#8., R1
+13$:	clr	(R5)+
+	sob	R1, 13$
+	add	#<80.-16.>, R5
+	sob	R3, 12$
+	mov	R2, R5
+	; set rotation
+	clr	R3
+	mov	#16., TEMPR3
+20$:	; get bit
+	clr	R1
+	rol	R0
+	rol	R1
+	; spr addr
+	asl	R1
+	asl	R1
+	asl	R1
+	add	#SPAL40, R1
+	; put bits
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	sub	#320., R5
+	tst	R3
+	beq	22$
+	inc	R5
+	inc	R5
+	clr	R3
+	br	24$
+22$:	mov	#4., R3
+24$:	dec	TEMPR3
+	bne	20$
+	return	
+
+; octal word print 4x5
+; R0 - word, R1, R2 - x*8, y
+SPROW4:	asl	R2
+	mov	LINEAD(R2), R2
+	asl	R1
+	add	R1, R2			; vaddr -> R2
+	; clearing vaddr
+	mov	R2, R5
+	mov	#5., R3
+12$:	clr	(R5)+
+	clr	(R5)+
+	clr	(R5)+
+	add	#<80.-6.>, R5
+	sob	R3, 12$
+	mov	R2, R5
+	; 1st bit
+	clr	R1
+	rol	R0
+	rol	R1
+	; set rotation
+	clr	R3
+	mov	#6., TEMPR3
+20$:	; spr addr
+	asl	R1
+	asl	R1
+	asl	R1
+	add	#SPAL40, R1
+	; put bits
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)
+	add	#80., R5
+	movb	(R1)+, R2
+	ash	R3, R2
+	bisb	R2, (R5)	
+	sub	#320., R5
+	tst	R3
+	beq	22$
+	inc	R5
+	inc	R5
+	clr	R3
+	br	24$
+22$:	mov	#4., R3
+24$:	; next octets
+	clr	R1
+	rol	R0
+	rol	R1
+	rol	R0
+	rol	R1
+	rol	R0
+	rol	R1
+	dec	TEMPR3
+	bne	20$
+	return	
+
+
+SPRD00:	.WORD	0
+SPRD04:	.BYTE	301
+SPRD05:	.BYTE	60, 60, 60, 60, 60, 0, 0
+SPRD06:	.BYTE	301
+SPRD07:	.BYTE	60, 0, 0
+SPRD90:	.WORD	10000., 1000., 100., 10., 1
+
+; decimal word print
+; R0 - word, R1, R2 - x*8, y
+SPRDWO:	mov	R0, TEMPR0
+	mov	#SPRD90, TEMPR2
+	mov	#5, TEMPR3
+	clr	SPRD00
+	mov	#SPRD05, R5
+1$:	mov	@TEMPR2, TEMPR1
+	add	#2, TEMPR2
+	clr	SPRD00
+10$:	cmp	TEMPR0, TEMPR1
+	blo	20$
+	sub	TEMPR1, TEMPR0
+	inc	SPRD00
+	br	10$
+20$:	mov	SPRD00, R0
+	add	#48., R0
+	movb	R0, (R5)+
+	dec	TEMPR3
+	bne	1$
+	mov	#SPRD04, R0
+	call	FN2PRT
+	return
+
+; decimal digit print (0..9)
+; R0 - num, R1, R2 - X*8, y
+SPRDDO:	add	#48., R0
+	movb	R0, SPRD07
+	mov	#SPRD06, R0
+	call	FN2PRT
+	return
+
+; out char (x1/x2) for planes 1,2 and advance vaddr
+; R0-char, R5 - addr
+CH0PR0:	sub	#32., R0		; common prepare vaddr and regs
+	asl	R0
+	mov	FN6OFS(R0), R0
+	add	#FN6DAT, R0
+	mov	#80., R1
+	mov	#6., R3
+	return
+CH1PR3:	call	CH0PR0			; for both planes
+3$:	mov	(R0)+, R2
+	mov	R2, (R5)
+	add	R1, R5
+	sob	R3, 3$
+	sub	#478., R5
+	return
+CH1PR2:	call	CH0PR0			; for plane 2
+3$:	mov	(R0)+, R2
+	clrb	R2
+	mov	R2, (R5)
+	add	R1, R5
+	sob	R3, 3$
+	sub	#478., R5
+	return
+CH1PR1:	call	CH0PR0			; for plane 1
+3$:	mov	(R0)+, R2
+	clrb	R2
+	swab	R2
+	mov	R2, (R5)
+	add	R1, R5
+	sob	R3, 3$
+	sub	#478., R5
+	return
+CH2PR3:	call	CH0PR0
+3$:	mov	(R0)+, R2
+	mov	R2, (R5)
+	add	R1, R5
+	mov	R2, (R5)
+	add	R1, R5
+	sob	R3, 3$
+	sub	#958., R5
+	return
+CH2PR2:	call	CH0PR0
+3$:	mov	(R0)+, R2
+	clrb	R2
+	mov	R2, (R5)
+	add	R1, R5
+	mov	R2, (R5)
+	add	R1, R5
+	sob	R3, 3$
+	sub	#958., R5
+	return
+CH2PR1:	call	CH0PR0
+3$:	mov	(R0)+, R2
+	clrb	R2
+	swab	R2
+	mov	R2, (R5)
+	add	R1, R5
+	mov	R2, (R5)
+	add	R1, R5
+	sob	R3, 3$
+	sub	#958., R5
+	return
+
+CH1TBA:	.WORD	0, CH1PR1, CH1PR2, CH1PR3
+CH2TBA:	.WORD	0, CH2PR1, CH2PR2, CH2PR3
+
+; out string (x1/x2 font), R0 - addr of asciz, R1 - x, R2 - y
+; codes in string - 301, 302, 303 - change color
+; x1 font print
+FN1PRT:	mov	#CH1TBA, TEMPR5
+	call	FN0PR0
+	return
+; x2 font print
+FN2PRT:	mov	#CH2TBA, TEMPR5
+	call	FN0PR0
+	return
+; common routine, TEMPR5 - table of char out routines
+FN0PR0:	asl	R2
+	mov	LINEAD(R2), R2
+	asl	R1
+	add	R1, R2
+	mov	R2, R5
+	mov	R0, TEMPR0
+	mov	#3, TEMPR1		; current color
+10$:	movb	@TEMPR0, R0
+	beq	99$
+	swab	R0
+	clrb	R0
+	swab	R0
+	cmp	R0, #301
+	blo	20$
+	mov	R0, TEMPR1
+	sub	#300, TEMPR1
+	inc	TEMPR0
+	br	10$
+20$:	mov	TEMPR1, R1
+	asl	R1
+	add	TEMPR5, R1
+	mov	(R1), R1
+	call	(R1)
+	inc	TEMPR0
+	br	10$
+99$:	return
+
+
+
+; clear planes 1 & 2
+CLRSC1:	mov	#VADDR, R5
+	mov	#<55000/2>, R3
+10$:	clr	(R5)+
+	sob	R3, 10$
+	return
+
+; clear screen planes
+CLRSCR:	mov	#C_CMD_CLEASC0, R5	; 2. - clear plane 0
+	call	CMDEXE
+	call	CLRSC1
+	return
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // UTILS
+; //////////////////////////////////////////////////////////////////////////////
+
+; minimal of R1,R1 -> R0
+GETMIN:	mov	R1, R0
+	cmp	R2, R0
+	blo	10$
+	return
+10$:	mov	R2, R0
+	return
+
+; maximal of R1,R2 -> R0
+GETMAX:	mov	R1, R0
+	cmp	R2, R0
+	bhi	10$
+	return
+10$:	mov	R2, R0
+	return
+
+RANS0L:	.BYTE	351			; 0xE9 for saving when new bridge coming up
+RANS0H:	.BYTE	352			; 0xEA
+RANSLO:	.BYTE	351			; for saving from RANS0L when new bridge is flying by
+RANSHI:	.BYTE	352
+RAND:
+RANDLO:	.BYTE	351
+RANDHI:	.BYTE	352
+RANDOM:	movb	RANDHI, R0		;LDA	randomHi
+	aslb	R0			;ASL
+	aslb	R0			;ASL
+	aslb	R0			;ASL
+	movb	RANDHI, R1		;EOR	randomHi	
+	xor	R1, R0
+	aslb	R0			;ASL
+	rolb	RANDLO			;ROL	randomLo
+	rolb	RANDHI			;ROL	randomHi
+	return
+	; (Blaire: its' taken from Atari asm code)
+	; (JTZ: randomHi is very random, randomLo is NOT when more than one bit is used,
+	; because: randomLo[x+1] = randomLo[x]*2 + 0/1, but randomLo is used more often,
+	; randomHi only for new enemy and which. This could make the game a bit predictable.)
+   
+; random with linear-feedback shift register (Galois)
+; random -> R0
+;.radix	16
+;LFSR10:	.WORD	0ACE1
+;LFSR11:	.WORD	0B400
+;LFSR00:	.WORD	0ACE1
+;LFSR01:	.WORD	0B400
+;RANDOM:	mov	R1, -(SP)
+;	mov	LFSR00, R0
+;	mov	LFSR01, R1
+;	clc
+;	ror	R0
+;	bcc	2$
+;	xor	R1, R0
+;2$:	mov	R0, LFSR00
+;	mov	R0, R1
+;	movb	R1, RANDLO
+;	clrb	R1
+;	swab	R1
+;	movb	R1, RANDHI
+;	mov	(SP)+, R1
+;	return
+;.radix 	8
+
+; vsyinc interrupt
+VSYNI:	inc	VSY1CN
+	inc	VSY2CN
+	rti
+	
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // DATA 
+; //////////////////////////////////////////////////////////////////////////////
+
+CMDADR:	.WORD	0		; addr in ppu command buffer
+
+TEMPR0:	.WORD	0
+TEMPR1:	.WORD	0
+TEMPR2:	.WORD	0
+TEMPR3:	.WORD	0
+TEMPR4:	.WORD	0
+TEMPR5:	.WORD	0
+
+WAICL0:	.WORD	0		; to measure wait time
+WAICLC:	.WORD	0		; avg wait time
+FRAMCN:	.WORD	0		; 'frame' counter
+PAUSE:	.WORD	0
+
+; current mode
+; 0 - main menu prepare, 1 - main menu
+; 2 - level prepare, 3 - play ... etc
+CURMOD:	.WORD	0
+
+; setup vars
+DBGMOD:	.WORD	0
+DBG002:	.WORD	0
+
+; // game variables /////////////////////////////////////////////////////////////////
+
+LEVEL:	.WORD	0		; current level
+SLEVEL:	.WORD	0
+LIVES:	.WORD	0		; lives number (0..9)
+SCORE:	.WORD	0
+SCORED:	.WORD	0		; flag <>0 - draw score
+HSCORE:	.WORD	0
+FUEL:	.WORD	0
+FUELD:	.WORD	0		; flag to draw fuel line
+
+PlaneX:	.word	0		; plane sprite X (float! 0-255 in h-byte, fractional in l-byte)
+PlaneY:	.word	0		; TODO: plane have different bounding box when turning
+PLANX1:	.WORD	0		; 'actual' plane 'bounding' box (without second Y)
+PLANX2:	.WORD	0		; because plane is starting from PLANEX+2
+
+C_PLAVEL_MIN	= 1*256.
+C_PLADVEL_MIN	= 18.
+
+PlaneDir:	.word	0	; plane is moving, 1-right, 2-left, 0-straight
+PlaneStatus:	.word	0	; plane status, 0 - normal, 1.. - exploding
+PlaneVel:	.word	0	; plane velocity (float)
+PlaneDVel:	.word	0	; plane velocity addition (float)
+
+DoubleSpeed:	.word	0
+SecondFrame:	.word	0
+
+MISSLX:	.WORD	0
+MISSLY:	.WORD	0
+BOOMCN:	.WORD	0		; boom counter to prevend create missile sound
+
+SCROLY: .WORD   287.    	; scroll line number
+SETRGB:	.WORD	177777		; RGB/GRB switch
+
+BLNXT1:	.WORD	15.		; next block starting left bank width (in 8-pix)
+BLSTA1:	.WORD	15.		; current block starting left bank width
+BLEND1:	.WORD	15.		; current block ending left bank width
+BLSTA2:	.WORD	0		; current island starting width
+BLEND2:	.WORD	0		; current island ending width
+BLEND3:	.WORD	0		; to save <4. dx
+BLOCKY:	.WORD	31.		; current line number in block 0
+BLOCNT:	.WORD	0		; current block number (0..15, 0 is bridge)
+NEEDLN:	.WORD	1		; need to draw first line
+
+NOFUEL:	.WORD	20.		; max blocks to run until create fuel
+
+; score add table
+SCOTBL:	.WORD	0, 0, 0, 0, 80., 30., 60., 100., 500.
+
+; blocks table (8 objects)
+; +00 object id (0-nothing, 1..2 - explosions, 3-house, 4-fuel, 5-ship, 6-helicopter, 7-plane, 8-bridge)
+; +01 object direction (0 - moving left)
+; +02 (WORD) object x
+; +04 object y (line number 0..255)
+; +05 object is moving = 0 (if movable), >0 - time to move
+; +06 object animation counter
+; +07 state flags
+BLOCKS:
+BLOCK0: .BLKB   8.
+Block1:	.blkb	8.
+Block2:	.blkb	8.
+Block3:	.blkb	8.
+Block4:	.blkb	8.
+Block5:	.blkb	8.
+BLOCK6:	.blkb	8.
+BLOCK7:	.BLKB	8.
+BLOCK8:	.BLKB	<8.*8.>	; reserved? for what?
+	
+; y-coord to vram table
+LINEAD:	.WORD	100000,100120,100240,100360,100500,100620,100740,101060,101200,101320
+	.WORD	101440,101560,101700,102020,102140,102260,102400,102520,102640,102760
+	.WORD	103100,103220,103340,103460,103600,103720,104040,104160,104300,104420
+	.WORD	104540,104660,105000,105120,105240,105360,105500,105620,105740,106060
+	.WORD	106200,106320,106440,106560,106700,107020,107140,107260,107400,107520
+	.WORD	107640,107760,110100,110220,110340,110460,110600,110720,111040,111160
+	.WORD	111300,111420,111540,111660,112000,112120,112240,112360,112500,112620
+	.WORD	112740,113060,113200,113320,113440,113560,113700,114020,114140,114260
+	.WORD	114400,114520,114640,114760,115100,115220,115340,115460,115600,115720
+	.WORD	116040,116160,116300,116420,116540,116660,117000,117120,117240,117360
+	.WORD	117500,117620,117740,120060,120200,120320,120440,120560,120700,121020
+	.WORD	121140,121260,121400,121520,121640,121760,122100,122220,122340,122460
+	.WORD	122600,122720,123040,123160,123300,123420,123540,123660,124000,124120
+	.WORD	124240,124360,124500,124620,124740,125060,125200,125320,125440,125560
+	.WORD	125700,126020,126140,126260,126400,126520,126640,126760,127100,127220
+	.WORD	127340,127460,127600,127720,130040,130160,130300,130420,130540,130660
+	.WORD	131000,131120,131240,131360,131500,131620,131740,132060,132200,132320
+	.WORD	132440,132560,132700,133020,133140,133260,133400,133520,133640,133760
+	.WORD	134100,134220,134340,134460,134600,134720,135040,135160,135300,135420
+	.WORD	135540,135660,136000,136120,136240,136360,136500,136620,136740,137060
+	.WORD	137200,137320,137440,137560,137700,140020,140140,140260,140400,140520
+	.WORD	140640,140760,141100,141220,141340,141460,141600,141720,142040,142160
+	.WORD	142300,142420,142540,142660,143000,143120,143240,143360,143500,143620
+	.WORD	143740,144060,144200,144320,144440,144560,144700,145020,145140,145260
+	.WORD	145400,145520,145640,145760,146100,146220,146340,146460,146600,146720
+	.WORD	147040,147160,147300,147420,147540,147660,150000,150120,150240,150360
+	.WORD	150500,150620,150740,151060,151200,151320,151440,151560,151700,152020
+	.WORD	152140,152260,152400,152520,152640,152760,153100,153220,153340,153460
+	.WORD	153600,153720,154040,154160,154300,154420,154540,154660
+
+; tables for random placement of objects fine tuning
+RNDT0L:	.WORD	RNDT00, RNDT01, RNDT02, RNDT03, RNDT04, RNDT05, RNDT06
+	.WORD	RNDT07, RNDT08, RNDT09, RNDT10, RNDT11, RNDT12, RNDT13, RNDT14
+.radix 10
+RNDT00:	.BYTE	0,  0,  0,  0,  0,  0,  0,  0
+RNDT01:	.BYTE	0,  1,  0,  1,  0,  1,  0,  1
+RNDT02:	.BYTE	0,  1,  2,  0,  1,  2,  0,  1
+RNDT03:	.BYTE	0,  1,  3,  2,  0,  1,  3,  2
+RNDT04:	.BYTE	1,  2,  3,  4,  1,  2,  3,  0
+RNDT05:	.BYTE	1,  2,  5,  3,  0,  4,  2,  3
+RNDT06:	.BYTE	1,  3,  6,  0,  2,  4,  5,  3
+RNDT07:	.BYTE	1,  3,  5,  7,  2,  4,  6,  4
+RNDT08:	.BYTE	0,  2,  4,  6,  8,  6,  4,  2
+RNDT09:	.BYTE	1,  3,  5,  7,  8,  7,  3,  5
+RNDT10:	.BYTE	2,  4,  6,  8,  9,  6,  4,  2
+RNDT11:	.BYTE	1,  3,  5,  6,  9, 10,  5,  6
+RNDT12:	.BYTE	1,  4,  6,  9, 11,  7,  6,  3
+RNDT13:	.BYTE	2,  5,  7, 10, 12,  5,  6,  4
+RNDT14:	.BYTE	2,  4,  6,  8, 10, 12, 14,  7
+; 16 bytes for random coords in straight section (5..31) a bit aligned left because of ship size
+;               0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+RNDT1L:	.BYTE	7,  9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 16, 18, 14, 20
+.radix 8
+
+; //////////////////////////////////////////////////////////////////////////////	
+; // GRAPHICS DATA
+
+@include cpu_font.mac
+
+; 4x5 bitnumbers
+SPAL40:	.BYTE	7,5,5,5,7,0,0,0, 2,2,2,2,2,0,0,0
+	.BYTE	7,4,7,1,7,0,0,0, 7,4,6,4,7,0,0,0
+	.BYTE	5,5,7,4,4,0,0,0, 7,1,7,4,7,0,0,0
+	.BYTE	7,1,7,5,7,0,0,0, 7,4,4,4,4,0,0,0
+	.BYTE	7,5,7,5,7,0,0,0, 7,5,7,4,7,0,0,0
+	
+; // SPRITES //////////////////////////////////////////////////////////////////////
+
+; road colors
+ROADCO:	.WORD	377, 377, 377, 377, 177777, 177777, 177777, 0, 0, 0, 0, 0, 0, 0, 0, ^B1111000011110000
+	.WORD	^B1111000011110000, 0, 0, 0, 0, 0, 0, 0, 0, 177777, 177777, 177777, 377, 377, 377, 377
+
+; helicopter explosion
+WSPL10:	.WORD	WSP100, WSP101, WSP102, WSP103, WSP104, WSP105, WSP106, WSP107
+WSPL11:	.WORD	WSP110, WSP111, WSP112, WSP113, WSP114, WSP115, WSP116, WSP117
+
+WSP100:	.WORD	177400, 177400, 177400, 177700, 177400, 177400, 177400, 177414
+	.WORD	177400, 177414, 177400, 177400, 177400, 177403, 177400, 177460
+	.WORD	177400, 177400, 177400, 177460, 177400, 177700, 177400, 177400
+	.WORD	177400, 177414, 177400, 177400, 177400, 177400
+WSP101:	.WORD	177400, 177400, 177400, 177600, 177401, 177400, 177400, 177430
+	.WORD	177400, 177430, 177400, 177400, 177400, 177406, 177400, 177540
+	.WORD	177400, 177400, 177400, 177540, 177400, 177600, 177401, 177400
+	.WORD	177400, 177430, 177400, 177400, 177400, 177400
+WSP102:	.WORD	177400, 177400, 177400, 177400, 177403, 177400, 177400, 177460
+	.WORD	177400, 177460, 177400, 177400, 177400, 177414, 177400, 177700
+	.WORD	177400, 177400, 177400, 177700, 177400, 177400, 177403, 177400
+	.WORD	177400, 177460, 177400, 177400, 177400, 177400
+WSP103:	.WORD	177400, 177400, 177400, 177400, 177406, 177400, 177400, 177540
+	.WORD	177400, 177540, 177400, 177400, 177400, 177430, 177400, 177600
+	.WORD	177401, 177400, 177400, 177600, 177401, 177400, 177406, 177400
+	.WORD	177400, 177540, 177400, 177400, 177400, 177400
+WSP104:	.WORD	177400, 177400, 177400, 177400, 177414, 177400, 177400, 177700
+	.WORD	177400, 177700, 177400, 177400, 177400, 177460, 177400, 177400
+	.WORD	177403, 177400, 177400, 177400, 177403, 177400, 177414, 177400
+	.WORD	177400, 177700, 177400, 177400, 177400, 177400
+WSP105:	.WORD	177400, 177400, 177400, 177400, 177430, 177400, 177400, 177600
+	.WORD	177401, 177600, 177401, 177400, 177400, 177540, 177400, 177400
+	.WORD	177406, 177400, 177400, 177400, 177406, 177400, 177430, 177400
+	.WORD	177400, 177600, 177401, 177400, 177400, 177400
+WSP106:	.WORD	177400, 177400, 177400, 177400, 177460, 177400, 177400, 177400
+	.WORD	177403, 177400, 177403, 177400, 177400, 177700, 177400, 177400
+	.WORD	177414, 177400, 177400, 177400, 177414, 177400, 177460, 177400
+	.WORD	177400, 177400, 177403, 177400, 177400, 177400
+WSP107:	.WORD	177400, 177400, 177400, 177400, 177540, 177400, 177400, 177400
+	.WORD	177406, 177400, 177406, 177400, 177400, 177600, 177401, 177400
+	.WORD	177430, 177400, 177400, 177400, 177430, 177400, 177540, 177400
+	.WORD	177400, 177400, 177406, 177400, 177400, 177400
+
+WSP110:	.WORD	177700, 177400, 177400, 177400, 147400, 177400, 177403, 177400
+	.WORD	177400, 147400, 177400, 177400, 177400, 177414, 177400, 171400
+	.WORD	37400, 177400, 37400, 177400, 177400, 177400, 177460, 177400
+	.WORD	177403, 177403, 177400, 147400, 177400, 177400
+WSP111:	.WORD	177600, 177401, 177400, 177400, 117400, 177400, 177406, 177400
+	.WORD	177400, 117400, 177400, 177400, 177400, 177430, 177400, 163400
+	.WORD	77400, 177000, 77400, 177000, 177400, 177400, 177540, 177400
+	.WORD	177406, 177406, 177400, 117400, 177400, 177400
+WSP112:	.WORD	177400, 177403, 177400, 177400, 37400, 177400, 177414, 177400
+	.WORD	177400, 37400, 177400, 177400, 177400, 177460, 177400, 147400
+	.WORD	177400, 176000, 177400, 176000, 177400, 177400, 177700, 177400
+	.WORD	177414, 177414, 177400, 37400, 177400, 177400
+WSP113:	.WORD	177400, 177406, 177400, 177400, 77400, 177000, 177430, 177400
+	.WORD	177400, 77400, 177000, 177400, 177400, 177540, 177400, 117400
+	.WORD	177400, 174400, 177400, 174400, 177400, 177400, 177600, 177401
+	.WORD	177430, 177430, 177400, 77400, 177000, 177400
+WSP114:	.WORD	177400, 177414, 177400, 177400, 177400, 176000, 177460, 177400
+	.WORD	177400, 177400, 176000, 177400, 177400, 177700, 177400, 37400
+	.WORD	177400, 171400, 177400, 171400, 177400, 177400, 177400, 177403
+	.WORD	177460, 177460, 177400, 177400, 176000, 177400
+WSP115:	.WORD	177400, 177430, 177400, 177400, 177400, 174400, 177540, 177400
+	.WORD	177400, 177400, 174400, 177400, 177400, 177600, 177401, 77400
+	.WORD	177000, 163400, 177400, 163400, 177400, 177400, 177400, 177406
+	.WORD	177540, 177540, 177400, 177400, 174400, 177400
+WSP116:	.WORD	177400, 177460, 177400, 177400, 177400, 171400, 177700, 177400
+	.WORD	177400, 177400, 171400, 177400, 177400, 177400, 177403, 177400
+	.WORD	176000, 147400, 177400, 147400, 177400, 177400, 177400, 177414
+	.WORD	177700, 177700, 177400, 177400, 171400, 177400
+WSP117:	.WORD	177400, 177540, 177400, 177400, 177400, 163400, 177600, 177401
+	.WORD	177400, 177400, 163400, 177400, 177400, 177400, 177406, 177400
+	.WORD	174400, 117400, 177400, 117400, 177400, 177400, 177400, 177430
+	.WORD	177600, 177601, 177401, 177400, 163400, 177400
+
+; ship explosion
+WSPL12:	.WORD	WSP120, WSP121, WSP122, WSP123, WSP124, WSP125, WSP126, WSP127
+WSPL13:	.WORD	WSP130, WSP131, WSP132, WSP133, WSP134, WSP135, WSP136, WSP137
+
+WSP120:	.WORD	177400, 177760, 177400, 177400, 177400, 177400, 177400, 177760
+	.WORD	177400, 177400, 177760, 177400, 177400, 177400, 177400, 177400
+	.WORD	177400, 177417, 177400, 177400, 177400, 177417, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177417, 177400, 177400, 177760
+	.WORD	177400, 177400, 177400, 177400, 177400, 177760, 177400, 177400
+WSP121:	.WORD	177400, 177740, 177401, 177400, 177400, 177400, 177400, 177740
+	.WORD	177401, 177400, 177740, 177401, 177400, 177400, 177400, 177400
+	.WORD	177400, 177436, 177400, 177400, 177400, 177436, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177436, 177400, 177400, 177740
+	.WORD	177401, 177400, 177400, 177400, 177400, 177740, 177401, 177400
+WSP122:	.WORD	177400, 177700, 177403, 177400, 177400, 177400, 177400, 177700
+	.WORD	177403, 177400, 177700, 177403, 177400, 177400, 177400, 177400
+	.WORD	177400, 177474, 177400, 177400, 177400, 177474, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177474, 177400, 177400, 177700
+	.WORD	177403, 177400, 177400, 177400, 177400, 177700, 177403, 177400
+WSP123:	.WORD	177400, 177600, 177407, 177400, 177400, 177400, 177400, 177600
+	.WORD	177407, 177400, 177600, 177407, 177400, 177400, 177400, 177400
+	.WORD	177400, 177570, 177400, 177400, 177400, 177570, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177570, 177400, 177400, 177600
+	.WORD	177407, 177400, 177400, 177400, 177400, 177600, 177407, 177400
+WSP124:	.WORD	177400, 177400, 177417, 177400, 177400, 177400, 177400, 177400
+	.WORD	177417, 177400, 177400, 177417, 177400, 177400, 177400, 177400
+	.WORD	177400, 177760, 177400, 177400, 177400, 177760, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177760, 177400, 177400, 177400
+	.WORD	177417, 177400, 177400, 177400, 177400, 177400, 177417, 177400
+WSP125:	.WORD	177400, 177400, 177436, 177400, 177400, 177400, 177400, 177400
+	.WORD	177436, 177400, 177400, 177436, 177400, 177400, 177400, 177400
+	.WORD	177400, 177740, 177401, 177400, 177400, 177740, 177401, 177400
+	.WORD	177400, 177400, 177400, 177400, 177740, 177401, 177400, 177400
+	.WORD	177436, 177400, 177400, 177400, 177400, 177400, 177436, 177400
+WSP126:	.WORD	177400, 177400, 177474, 177400, 177400, 177400, 177400, 177400
+	.WORD	177474, 177400, 177400, 177474, 177400, 177400, 177400, 177400
+	.WORD	177400, 177700, 177403, 177400, 177400, 177700, 177403, 177400
+	.WORD	177400, 177400, 177400, 177400, 177700, 177403, 177400, 177400
+	.WORD	177474, 177400, 177400, 177400, 177400, 177400, 177474, 177400
+WSP127:	.WORD	177400, 177400, 177570, 177400, 177400, 177400, 177400, 177400
+	.WORD	177570, 177400, 177400, 177570, 177400, 177400, 177400, 177400
+	.WORD	177400, 177600, 177407, 177400, 177400, 177600, 177407, 177400
+	.WORD	177400, 177400, 177400, 177400, 177600, 177407, 177400, 177400
+	.WORD	177570, 177400, 177400, 177400, 177400, 177400, 177570, 177400
+
+WSP130:	.WORD	177400, 177760, 177400, 177400, 177400, 177400, 177400, 177400
+	.WORD	170000, 177400, 177417, 177400, 177400, 177400, 177400, 177400
+	.WORD	170000, 177400, 177400, 177400, 177400, 177400, 177760, 177400
+	.WORD	177400, 7400, 177400, 177400, 7400, 177400, 177400, 7400
+	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177417, 177400
+WSP131:	.WORD	177400, 177740, 177401, 177400, 177400, 177400, 177400, 177400
+	.WORD	160400, 177400, 177436, 177400, 177400, 177400, 177400, 177400
+	.WORD	160400, 177400, 177400, 177400, 177400, 177400, 177740, 177401
+	.WORD	177400, 17400, 177000, 177400, 17400, 177000, 177400, 17400
+	.WORD	177000, 177400, 177400, 177400, 177400, 177400, 177436, 177400
+WSP132:	.WORD	177400, 177700, 177403, 177400, 177400, 177400, 177400, 177400
+	.WORD	141400, 177400, 177474, 177400, 177400, 177400, 177400, 177400
+	.WORD	141400, 177400, 177400, 177400, 177400, 177400, 177700, 177403
+	.WORD	177400, 37400, 176000, 177400, 37400, 176000, 177400, 37400
+	.WORD	176000, 177400, 177400, 177400, 177400, 177400, 177474, 177400
+WSP133:	.WORD	177400, 177600, 177407, 177400, 177400, 177400, 177400, 177400
+	.WORD	103400, 177400, 177570, 177400, 177400, 177400, 177400, 177400
+	.WORD	103400, 177400, 177400, 177400, 177400, 177400, 177600, 177407
+	.WORD	177400, 77400, 174000, 177400, 77400, 174000, 177400, 77400
+	.WORD	174000, 177400, 177400, 177400, 177400, 177400, 177570, 177400
+WSP134:	.WORD	177400, 177400, 177417, 177400, 177400, 177400, 177400, 177400
+	.WORD	7400, 177400, 177760, 177400, 177400, 177400, 177400, 177400
+	.WORD	7400, 177400, 177400, 177400, 177400, 177400, 177400, 177417
+	.WORD	177400, 177400, 170000, 177400, 177400, 170000, 177400, 177400
+	.WORD	170000, 177400, 177400, 177400, 177400, 177400, 177760, 177400
+WSP135:	.WORD	177400, 177400, 177436, 177400, 177400, 177400, 177400, 177400
+	.WORD	17400, 177000, 177740, 177401, 177400, 177400, 177400, 177400
+	.WORD	17400, 177000, 177400, 177400, 177400, 177400, 177400, 177436
+	.WORD	177400, 177400, 160400, 177400, 177400, 160400, 177400, 177400
+	.WORD	160400, 177400, 177400, 177400, 177400, 177400, 177740, 177401
+WSP136:	.WORD	177400, 177400, 177474, 177400, 177400, 177400, 177400, 177400
+	.WORD	37400, 176000, 177700, 177403, 177400, 177400, 177400, 177400
+	.WORD	37400, 176000, 177400, 177400, 177400, 177400, 177400, 177474
+	.WORD	177400, 177400, 141400, 177400, 177400, 141400, 177400, 177400
+	.WORD	141400, 177400, 177400, 177400, 177400, 177400, 177700, 177403
+WSP137:	.WORD	177400, 177400, 177570, 177400, 177400, 177400, 177400, 177400
+	.WORD	77400, 174000, 177600, 177407, 177400, 177400, 177400, 177400
+	.WORD	77400, 174000, 177400, 177400, 177400, 177400, 177400, 177570
+	.WORD	177400, 177400, 103400, 177400, 177400, 103400, 177400, 177400
+	.WORD	103400, 177400, 177400, 177400, 177400, 177400, 177600, 177407
+
+	
+; house 32 x 20 (4 words x 20 lines)
+WSPRI3:	.WORD	WCP30, WCP31
+WCP30:	.WORD	377, 1, 340, 377, 37, 0, 0, 376
+	.WORD	1, 0, 0, 340, 177377, 177777, 177777, 17777
+	.WORD	17037, 17036, 17036, 17376, 17037, 17036, 17036, 17376
+	.WORD	17037, 17036, 17036, 17376, 177377, 177777, 177777, 17777
+	.WORD	377, 377, 377, 377, 377, 377, 170377, 377
+	.WORD	377, 377, 170377, 377, 377, 377, 170377, 377
+	.WORD	377, 377, 177777, 7777, 377, 377, 177777, 7777
+	.WORD	377, 377, 177777, 7777, 377, 170377, 177777, 177777
+	.WORD	377, 170377, 177777, 177777, 377, 377, 177777, 7777
+	.WORD	377, 377, 17, 377, 377, 377, 17, 377 
+WCP31:	.WORD	377, 7, 200, 377, 177, 0, 0, 370
+	.WORD	7, 0, 0, 200, 174377, 177777, 177777, 77777
+	.WORD	74177, 74170, 74170, 74370, 74177, 74170, 74170, 74370
+	.WORD	74177, 74170, 74170, 74370, 174377, 177777, 177777, 77777
+	.WORD	377, 377, 377, 377, 377, 7777, 377, 377
+	.WORD	377, 7777, 377, 377, 377, 7777, 377, 377
+	.WORD	170377, 177777, 377, 377, 170377, 177777, 377, 377
+	.WORD	170377, 177777, 377, 377, 177777, 177777, 7777, 377
+	.WORD	177777, 177777, 7777, 377, 170377, 177777, 377, 377
+	.WORD	377, 360, 377, 377, 377, 360, 377, 377 
+
+; fuel 16 x 24
+WCP40:	.WORD	1400, 140000, 160000, 3400, 60000, 0, 160000, 400
+	.WORD	60000, 0, 60000, 0, 177777, 177777, 177637, 177771
+	.WORD	177637, 177771, 177637, 177771, 177437, 177770, 177777, 177777
+	.WORD	160000, 3400, 60000, 0, 160000, 400, 60000, 0
+	.WORD	160000, 3400, 0, 0, 177637, 177777, 177637, 177777
+	.WORD	177637, 177777, 177637, 177777, 177437, 177770, 177777, 177777 
+
+; fuel explosion
+WCP41:	.WORD	177400, 177400, 177440, 177400, 177400, 177420, 177700, 177400
+	.WORD	177400, 177414, 177414, 177400, 177400, 177403, 177460, 177440
+	.WORD	177400, 177400, 177600, 177414, 177414, 177400, 177400, 177543
+	.WORD	177460, 177400, 177400, 177420, 177700, 177400, 177400, 177450
+	.WORD	177414, 177400, 177400, 177406, 177540, 177400, 177410, 177440
+	.WORD	177600, 177414, 177400, 177400, 177440, 177402, 177400, 177400
+WCP42:	.WORD	171400, 177414, 177700, 177400, 177400, 147400, 176000, 177400
+	.WORD	147400, 177400, 177400, 177414, 171400, 37400, 37400, 177400
+	.WORD	177400, 177460, 177403, 177403, 147400, 77400, 177400, 171400
+	.WORD	177400, 177400, 177414, 177400, 37400, 177700, 176000, 177414
+	.WORD	177400, 177400, 177400, 177400, 177460, 147400, 177400, 177403
+	.WORD	171400, 177400, 177400, 37400, 177400, 171400, 177460, 177400
+
+; just blue color ^_^
+WCPBLU:	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177400, 177400
+	.WORD	177400, 177400, 177400, 177400, 177400, 177400, 177400, 177400
+
+		
+; ship 40 x 8
+WSP50L:	.WORD	WSP500, WSP501, WSP502, WSP503, WSP504, WSP505, WSP506, WSP507
+WSP51L:	.WORD	WSP510, WSP511, WSP512, WSP513, WSP514, WSP515, WSP516, WSP517
+
+WSP500:	.WORD	177400, 7400, 177400, 177400, 177400, 177400, 7400, 177400
+	.WORD	177400, 177400, 177400, 0, 177400, 177400, 177400, 7400
+	.WORD	0, 170000, 177400, 177400, 400, 0, 0, 0
+	.WORD	177400, 400, 0, 0, 170000, 177400, 177776, 177777
+	.WORD	177777, 177400, 177400, 177760, 177777, 177777, 177400, 177400
+WSP501:	.WORD	177400, 17400, 177000, 177400, 177400, 177400, 17400, 177000
+	.WORD	177400, 177400, 177400, 400, 177000, 177400, 177400, 17400
+	.WORD	0, 160000, 177400, 177400, 1400, 0, 0, 0
+	.WORD	177000, 1400, 0, 0, 160000, 177400, 177774, 177777
+	.WORD	177777, 177401, 177400, 177740, 177777, 177777, 177401, 177400
+WSP502:	.WORD	177400, 37400, 176000, 177400, 177400, 177400, 37400, 176000
+	.WORD	177400, 177400, 177400, 1400, 176000, 177400, 177400, 37400
+	.WORD	0, 140000, 177400, 177400, 3400, 0, 0, 0
+	.WORD	176000, 3400, 0, 0, 140000, 177400, 177770, 177777
+	.WORD	177777, 177403, 177400, 177700, 177777, 177777, 177403, 177400
+WSP503:	.WORD	177400, 77400, 174000, 177400, 177400, 177400, 77400, 174000
+	.WORD	177400, 177400, 177400, 3400, 174000, 177400, 177400, 77400
+	.WORD	0, 100000, 177400, 177400, 7400, 0, 0, 0
+	.WORD	174000, 7400, 0, 0, 100000, 177400, 177760, 177777
+	.WORD	177777, 177407, 177400, 177600, 177777, 177777, 177407, 177400
+WSP504:	.WORD	177400, 177400, 170000, 177400, 177400, 177400, 177400, 170000
+	.WORD	177400, 177400, 177400, 7400, 170000, 177400, 177400, 177400
+	.WORD	0, 0, 177400, 177400, 17400, 0, 0, 0
+	.WORD	170000, 17400, 0, 0, 0, 177400, 177740, 177777
+	.WORD	177777, 177417, 177400, 177400, 177777, 177777, 177417, 177400
+WSP505:	.WORD	177400, 177400, 160400, 177400, 177400, 177400, 177400, 160400
+	.WORD	177400, 177400, 177400, 17400, 160000, 177400, 177400, 177400
+	.WORD	400, 0, 177000, 177400, 37400, 0, 0, 0
+	.WORD	160000, 37400, 0, 0, 0, 177000, 177700, 177777
+	.WORD	177777, 177437, 177400, 177400, 177776, 177777, 177437, 177400
+WSP506:	.WORD	177400, 177400, 141400, 177400, 177400, 177400, 177400, 141400
+	.WORD	177400, 177400, 177400, 37400, 140000, 177400, 177400, 177400
+	.WORD	1400, 0, 176000, 177400, 77400, 0, 0, 0
+	.WORD	140000, 77400, 0, 0, 0, 176000, 177600, 177777
+	.WORD	177777, 177477, 177400, 177400, 177774, 177777, 177477, 177400
+WSP507:	.WORD	177400, 177400, 103400, 177400, 177400, 177400, 177400, 103400
+	.WORD	177400, 177400, 177400, 77400, 100000, 177400, 177400, 177400
+	.WORD	3400, 0, 174000, 177400, 177400, 0, 0, 0
+	.WORD	100000, 177400, 0, 0, 0, 174000, 177400, 177777
+	.WORD	177777, 177577, 177400, 177400, 177770, 177777, 177577, 177400
+	
+WSP510:	.WORD	177400, 177400, 170000, 177400, 177400, 177400, 177400, 170000
+	.WORD	177400, 177400, 177400, 177400, 0, 177400, 177400, 177400
+	.WORD	7400, 0, 170000, 177400, 0, 0, 0, 0
+	.WORD	177400, 7400, 0, 0, 0, 177400, 177400, 177777
+	.WORD	177777, 177777, 177400, 177400, 177777, 177777, 177417, 177400
+WSP511:	.WORD	177400, 177400, 160400, 177400, 177400, 177400, 177400, 160400
+	.WORD	177400, 177400, 177400, 177400, 400, 177000, 177400, 177400
+	.WORD	17400, 0, 160000, 177400, 400, 0, 0, 0
+	.WORD	177000, 17400, 0, 0, 0, 177000, 177400, 177776
+	.WORD	177777, 177777, 177401, 177400, 177776, 177777, 177437, 177400
+WSP512:	.WORD	177400, 177400, 141400, 177400, 177400, 177400, 177400, 141400
+	.WORD	177400, 177400, 177400, 177400, 1400, 176000, 177400, 177400
+	.WORD	37400, 0, 140000, 177400, 1400, 0, 0, 0
+	.WORD	176000, 37400, 0, 0, 0, 176000, 177400, 177774
+	.WORD	177777, 177777, 177403, 177400, 177774, 177777, 177477, 177400
+WSP513:	.WORD	177400, 177400, 103400, 177400, 177400, 177400, 177400, 103400
+	.WORD	177400, 177400, 177400, 177400, 3400, 174000, 177400, 177400
+	.WORD	77400, 0, 100000, 177400, 3400, 0, 0, 0
+	.WORD	174000, 77400, 0, 0, 0, 174000, 177400, 177770
+	.WORD	177777, 177777, 177407, 177400, 177770, 177777, 177577, 177400
+WSP514:	.WORD	177400, 177400, 7400, 177400, 177400, 177400, 177400, 7400
+	.WORD	177400, 177400, 177400, 177400, 7400, 170000, 177400, 177400
+	.WORD	177400, 0, 0, 177400, 7400, 0, 0, 0
+	.WORD	170000, 177400, 0, 0, 0, 170000, 177400, 177760
+	.WORD	177777, 177777, 177417, 177400, 177760, 177777, 177777, 177400
+WSP515:	.WORD	177400, 177400, 17400, 177000, 177400, 177400, 177400, 17400
+	.WORD	177000, 177400, 177400, 177400, 17400, 160000, 177400, 177400
+	.WORD	177400, 400, 0, 177000, 17400, 0, 0, 0
+	.WORD	160000, 177400, 400, 0, 0, 160000, 177400, 177740
+	.WORD	177777, 177777, 177437, 177400, 177740, 177777, 177777, 177401
+WSP516:	.WORD	177400, 177400, 37400, 176000, 177400, 177400, 177400, 37400
+	.WORD	176000, 177400, 177400, 177400, 37400, 140000, 177400, 177400
+	.WORD	177400, 1400, 0, 176000, 37400, 0, 0, 0
+	.WORD	140000, 177400, 1400, 0, 0, 140000, 177400, 177700
+	.WORD	177777, 177777, 177477, 177400, 177700, 177777, 177777, 177403
+WSP517:	.WORD	177400, 177400, 77400, 174000, 177400, 177400, 177400, 77400
+	.WORD	174000, 177400, 177400, 177400, 77400, 100000, 177400, 177400
+	.WORD	177400, 3400, 0, 174000, 77400, 0, 0, 0
+	.WORD	100000, 177400, 3400, 0, 0, 100000, 177400, 177600
+	.WORD	177777, 177777, 177577, 177400, 177600, 177777, 177777, 177407
+
+; helicopter 24 x 10
+; by animation number & direction (0-bit - direction, 1-bit - animation)
+WSP60A:	.WORD	WSP60L, WSP61L, WSP62L, WSP63L
+WSP60L:	.WORD	WSP600, WSP601, WSP602, WSP603, WSP604, WSP605, WSP606, WSP607
+WSP61L:	.WORD	WSP610, WSP611, WSP612, WSP613, WSP614, WSP615, WSP616, WSP617
+WSP62L:	.WORD	WSP620, WSP621, WSP622, WSP623, WSP624, WSP625, WSP626, WSP627
+WSP63L:	.WORD	WSP630, WSP631, WSP632, WSP633, WSP634, WSP635, WSP636, WSP637
+
+WSP600:	.WORD	177700, 177417, 177400, 177400, 177774, 177400, 177400, 177414
+	.WORD	177400, 177400, 140000, 177400, 34400, 20040, 177400, 5412
+	.WORD	160340, 177400, 400, 0, 177400, 174400, 140000, 177400
+	.WORD	177400, 171400, 177400, 177400, 177477, 177400
+WSP601:	.WORD	177600, 177437, 177400, 177400, 177770, 177401, 177400, 177430
+	.WORD	177400, 177400, 100400, 177400, 71400, 40100, 177000, 13424
+	.WORD	140300, 177401, 1400, 0, 177000, 171400, 100400, 177400
+	.WORD	177400, 163400, 177400, 177400, 177576, 177400
+WSP602:	.WORD	177400, 177477, 177400, 177400, 177760, 177403, 177400, 177460
+	.WORD	177400, 177400, 1400, 177400, 163400, 100200, 176000, 27450
+	.WORD	100200, 177403, 3400, 0, 176000, 163400, 1400, 177400
+	.WORD	177400, 147400, 177400, 177400, 177774, 177400
+WSP603:	.WORD	177400, 177576, 177400, 177400, 177740, 177407, 177400, 177540
+	.WORD	177400, 177400, 3400, 177000, 147400, 400, 174401, 57520
+	.WORD	0, 177407, 7400, 0, 174000, 147400, 3400, 177000
+	.WORD	177400, 117400, 177400, 177400, 177770, 177401
+WSP604:	.WORD	177400, 177774, 177400, 177400, 177700, 177417, 177400, 177700
+	.WORD	177400, 177400, 7400, 176000, 117400, 1400, 171002, 137640
+	.WORD	0, 177016, 17400, 0, 170000, 117400, 7400, 176000
+	.WORD	177400, 37400, 177400, 177400, 177760, 177403
+WSP605:	.WORD	177400, 177770, 177401, 177400, 177600, 177437, 177400, 177600
+	.WORD	177401, 177400, 17400, 174000, 37400, 3400, 162004, 77500
+	.WORD	401, 176034, 37400, 0, 160000, 37400, 17400, 174000
+	.WORD	177400, 77400, 177000, 177400, 177740, 177407
+WSP606:	.WORD	177400, 177760, 177403, 177400, 177400, 177477, 177400, 177400
+	.WORD	177403, 177400, 37400, 170000, 77400, 7000, 144010, 177600
+	.WORD	1002, 174070, 77400, 0, 140000, 77400, 37000, 170000
+	.WORD	177400, 177400, 176000, 177400, 177700, 177417
+WSP607:	.WORD	177400, 177740, 177407, 177400, 177400, 177576, 177400, 177400
+	.WORD	177406, 177400, 77400, 160000, 177400, 16000, 110020, 177400
+	.WORD	2405, 170160, 177400, 0, 100000, 177400, 76000, 160000
+	.WORD	177400, 177400, 174400, 177400, 177600, 177437
+WSP610:	.WORD	177760, 177403, 177400, 177477, 177400, 177400, 177460, 177400
+	.WORD	177400, 1400, 177400, 177400, 2004, 36000, 177400, 3407
+	.WORD	120240, 177400, 0, 0, 177400, 1400, 37400, 177400
+	.WORD	147400, 177400, 177400, 177774, 177400, 177400
+WSP611:	.WORD	177740, 177407, 177400, 177576, 177400, 177400, 177540, 177400
+	.WORD	177400, 3400, 177000, 177400, 4410, 74000, 177000, 7416
+	.WORD	40100, 177401, 400, 0, 177000, 3400, 77000, 177000
+	.WORD	117400, 177400, 177400, 177770, 177401, 177400
+WSP612:	.WORD	177700, 177417, 177400, 177774, 177400, 177400, 177700, 177400
+	.WORD	177400, 7400, 176000, 177400, 11420, 170000, 176000, 17434
+	.WORD	100200, 177002, 1400, 0, 176000, 7400, 176000, 176000
+	.WORD	37400, 177400, 177400, 177760, 177403, 177400
+WSP613:	.WORD	177600, 177437, 177400, 177770, 177401, 177400, 177600, 177401
+	.WORD	177400, 17400, 174000, 177400, 23440, 160000, 174400, 37470
+	.WORD	0, 176405, 3400, 0, 174000, 17400, 174000, 174400
+	.WORD	77400, 177000, 177400, 177740, 177407, 177400
+WSP614:	.WORD	177400, 177477, 177400, 177760, 177403, 177400, 177400, 177403
+	.WORD	177400, 37400, 170000, 177400, 47500, 140000, 171400, 77560
+	.WORD	0, 175012, 7400, 0, 170000, 37400, 170000, 171400
+	.WORD	177400, 176000, 177400, 177700, 177417, 177400
+WSP615:	.WORD	177400, 177576, 177400, 177740, 177407, 177400, 177400, 177406
+	.WORD	177400, 77400, 160000, 177400, 117600, 100000, 163400, 177740
+	.WORD	0, 172024, 17400, 0, 160000, 77400, 160000, 163400
+	.WORD	177400, 174400, 177400, 177600, 177437, 177400
+WSP616:	.WORD	177400, 177774, 177400, 177700, 177417, 177400, 177400, 177414
+	.WORD	177400, 177400, 140000, 177400, 37400, 401, 147400, 177700
+	.WORD	401, 164050, 37400, 0, 140000, 177400, 140000, 147400
+	.WORD	177400, 171400, 177400, 177400, 177477, 177400
+WSP617:	.WORD	177400, 177770, 177401, 177600, 177437, 177400, 177400, 177430
+	.WORD	177400, 177400, 100400, 177400, 77400, 1002, 117000, 177600
+	.WORD	1403, 150120, 77400, 0, 100000, 177400, 100400, 117400
+	.WORD	177400, 163400, 177400, 177400, 177576, 177400
+WSP620:	.WORD	177400, 177774, 177400, 177700, 177417, 177400, 177400, 177414
+	.WORD	177400, 177400, 140000, 177400, 36404, 20040, 177400, 400
+	.WORD	160340, 177400, 2404, 0, 177400, 174400, 140000, 177400
+	.WORD	177400, 171400, 177400, 177400, 177477, 177400
+WSP621:	.WORD	177400, 177770, 177401, 177600, 177437, 177400, 177400, 177430
+	.WORD	177400, 177400, 100400, 177400, 75410, 40100, 177000, 1400
+	.WORD	140300, 177401, 5410, 0, 177000, 171400, 100400, 177400
+	.WORD	177400, 163400, 177400, 177400, 177576, 177400
+WSP622:	.WORD	177400, 177760, 177403, 177400, 177477, 177400, 177400, 177460
+	.WORD	177400, 177400, 1400, 177400, 173420, 100200, 176000, 3400
+	.WORD	100200, 177403, 13420, 0, 176000, 163400, 1400, 177400
+	.WORD	177400, 147400, 177400, 177400, 177774, 177400
+WSP623:	.WORD	177400, 177740, 177407, 177400, 177576, 177400, 177400, 177540
+	.WORD	177400, 177400, 3400, 177000, 167440, 400, 174401, 7400
+	.WORD	0, 177407, 27440, 0, 174000, 147400, 3400, 177000
+	.WORD	177400, 117400, 177400, 177400, 177770, 177401
+WSP624:	.WORD	177400, 177700, 177417, 177400, 177774, 177400, 177400, 177700
+	.WORD	177400, 177400, 7400, 176000, 157500, 1400, 171002, 17400
+	.WORD	0, 177016, 57500, 0, 170000, 117400, 7400, 176000
+	.WORD	177400, 37400, 177400, 177400, 177760, 177403
+WSP625:	.WORD	177400, 177600, 177437, 177400, 177770, 177401, 177400, 177600
+	.WORD	177401, 177400, 17400, 174000, 137600, 3400, 162004, 37400
+	.WORD	0, 176034, 137600, 0, 160000, 37400, 17400, 174000
+	.WORD	177400, 77400, 177000, 177400, 177740, 177407
+WSP626:	.WORD	177400, 177400, 177477, 177400, 177760, 177403, 177400, 177400
+	.WORD	177403, 177400, 37400, 170000, 77400, 7401, 144010, 77400
+	.WORD	0, 174070, 77400, 401, 140000, 77400, 37000, 170000
+	.WORD	177400, 177400, 176000, 177400, 177700, 177417
+WSP627:	.WORD	177400, 177400, 177576, 177400, 177740, 177407, 177400, 177400
+	.WORD	177406, 177400, 77400, 160000, 177400, 17002, 110020, 177400
+	.WORD	0, 170160, 177400, 1002, 100000, 177400, 76000, 160000
+	.WORD	177400, 177400, 174400, 177400, 177600, 177437
+WSP630:	.WORD	177477, 177400, 177400, 177760, 177403, 177400, 177460, 177400
+	.WORD	177400, 1400, 177400, 177400, 2004, 76100, 177400, 3407
+	.WORD	0, 177400, 0, 40100, 177400, 1400, 37400, 177400
+	.WORD	147400, 177400, 177400, 177774, 177400, 177400
+WSP631:	.WORD	177576, 177400, 177400, 177740, 177407, 177400, 177540, 177400
+	.WORD	177400, 3400, 177000, 177400, 4410, 174200, 177000, 7416
+	.WORD	0, 177000, 400, 100200, 177000, 3400, 77000, 177000
+	.WORD	117400, 177400, 177400, 177770, 177401, 177400
+WSP632:	.WORD	177774, 177400, 177400, 177700, 177417, 177400, 177700, 177400
+	.WORD	177400, 7400, 176000, 177400, 11420, 170000, 176401, 17434
+	.WORD	0, 176000, 1400, 0, 176401, 7400, 176000, 176000
+	.WORD	37400, 177400, 177400, 177760, 177403, 177400
+WSP633:	.WORD	177770, 177401, 177400, 177600, 177437, 177400, 177600, 177401
+	.WORD	177400, 17400, 174000, 177400, 23440, 160000, 175402, 37470
+	.WORD	0, 174000, 3400, 0, 175002, 17400, 174000, 174400
+	.WORD	77400, 177000, 177400, 177740, 177407, 177400
+WSP634:	.WORD	177760, 177403, 177400, 177400, 177477, 177400, 177400, 177403
+	.WORD	177400, 37400, 170000, 177400, 47500, 140000, 173404, 77560
+	.WORD	0, 170000, 7400, 0, 172004, 37400, 170000, 171400
+	.WORD	177400, 176000, 177400, 177700, 177417, 177400
+WSP635:	.WORD	177740, 177407, 177400, 177400, 177576, 177400, 177400, 177406
+	.WORD	177400, 77400, 160000, 177400, 117600, 100000, 167410, 177740
+	.WORD	0, 160000, 17400, 0, 164010, 77400, 160000, 163400
+	.WORD	177400, 174400, 177400, 177600, 177437, 177400
+WSP636:	.WORD	177700, 177417, 177400, 177400, 177774, 177400, 177400, 177414
+	.WORD	177400, 177400, 140000, 177400, 37400, 401, 157420, 177700
+	.WORD	401, 140000, 37400, 0, 150020, 177400, 140000, 147400
+	.WORD	177400, 171400, 177400, 177400, 177477, 177400
+WSP637:	.WORD	177600, 177437, 177400, 177400, 177770, 177401, 177400, 177430
+	.WORD	177400, 177400, 100400, 177400, 77400, 1002, 137040, 177600
+	.WORD	1403, 100000, 77400, 0, 120040, 177400, 100400, 117400
+	.WORD	177400, 163400, 177400, 177400, 177576, 177400
+
+; // INTERFACE SPRITES //
+
+; fuel interface
+	.WORD	12., 20.
+WCP00:	.WORD	177777, 177777, 177777, 177777, 177777, 177777, 177777, 177777
+	.WORD	177777, 177777, 177777, 177777, 1403, 7417, 0, 0
+	.WORD	0, 100200, 401, 0, 0, 0, 170360, 140300
+	.WORD	1403, 7417, 0, 0, 0, 100200, 401, 0
+	.WORD	0, 0, 170360, 140300, 1403, 7417, 0, 0
+	.WORD	0, 100200, 401, 0, 0, 0, 170360, 140300
+	.WORD	1403, 7417, 0, 0, 0, 101603, 401, 0
+	.WORD	0, 0, 170360, 140300, 1403, 0, 0, 0
+	.WORD	140300, 1403, 0, 0, 0, 0, 0, 140300
+	.WORD	1403, 0, 0, 0, 0, 1403, 100200, 3407
+	.WORD	0, 0, 0, 140300, 1403, 0, 0, 0
+	.WORD	0, 1403, 160340, 401, 0, 0, 0, 140300
+	.WORD	1403, 177777, 401, 0, 0, 1403, 74170, 0
+	.WORD	0, 160340, 37477, 140300, 1403, 1403, 0, 0
+	.WORD	140300, 7417, 17036, 0, 0, 60140, 0, 140300
+	.WORD	1403, 1403, 0, 0, 0, 100200, 3407, 0
+	.WORD	0, 60140, 0, 140300, 1403, 1403, 0, 0
+	.WORD	0, 160340, 401, 0, 0, 60140, 0, 140300
+	.WORD	1403, 37477, 0, 0, 0, 74170, 170360, 3407
+	.WORD	0, 160340, 3407, 140300, 1403, 1403, 0, 0
+	.WORD	0, 17036, 0, 3006, 0, 60140, 0, 140300
+	.WORD	1403, 1403, 0, 0, 100200, 3407, 170360, 3407
+	.WORD	0, 60140, 0, 140300, 1403, 1403, 0, 0
+	.WORD	160340, 401, 30060, 0, 0, 60140, 0, 140300
+	.WORD	1403, 177777, 401, 0, 0, 0, 170360, 3407
+	.WORD	0, 60140, 0, 140300, 1403, 0, 0, 0
+	.WORD	0, 0, 0, 0, 0, 0, 0, 140300
+	.WORD	1403, 0, 0, 0, 0, 0, 0, 0
+	.WORD	0, 0, 0, 140300, 177777, 177777, 177777, 177777
+	.WORD	177777, 177777, 177777, 177777, 177777, 177777, 177777, 177777 
+	
+END:
+	
+; // ADDRESSes /////////////////////////////////////////////////////////////////
+
+VADDR =100000	; vram for planes 1 & 2
+
+; CPU-PPU exchange
+CMDBUF=156000	; ~450 bytes, 224 words command buffer
+PPUYYY=157600	; PPU state
+
+KEYK2 =157724	; key K2
+KEYSHI=157726	; key SHIFT
+WAIPPU=157730	; PPU wait cycles number
+KEY4  =157732	; key K4
+KEYCOM=157734	; combo was pressed
+RTICN2=157736	; strange interrupts number in PPU
+KEY3  =157740	; key 3
+KEYK1 =157742	; key K1
+KEYSTP=157744	; key STOP
+KEYUST=157746	; key UST
+KEY2  =157750	; key 2
+KEY1  =157752	; key 1
+KEYENT=157754	; key ENTER
+KEYSPC=157756	; key SPACE
+KEYRHT=157760	; key ->
+KEYLFT=157762	; key <-
+KEYDWN=157764	; key DOWN
+KEYUP =157766	; key UP
+KEYCUR=157770	; current key
+VSY2CN=157772	; vsync 2 counter
+VSY1CN=157774	; vsync 1 counter
+
+	.even
+CpuEnd:
+	.end	Start

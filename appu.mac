@@ -1,0 +1,1221 @@
+	.TITLE	RIVPPU
+	.ENABL	LC,AMA		; AMA - absolute addressing mode
+	.ASECT
+	.=0
+
+@include ppu_header.mac
+	
+PPMain:	; clean upper PPU RAM (with screen plane 0)
+	mov	#PpuEnd, R0
+	mov	#177000-PpuEnd/2, R3
+	clr	(R0)+
+	sob	R3, .-2
+ 
+	; ackn of PPU launch
+	mov	#PPUYYY, @#177010
+	clr	@#177014
+
+ 	; wait for asking to start phase 3
+	mov	#PPUYYY, @#177010
+	cmp     #30, @#177014
+	bne	.-14
+        
+	; final preparations
+	call	CLEAUP		; cleanup upper RAM
+
+	; timers
+	bic	#^B0000001000000000, @#177054	; disallow vsync in PPU
+	bis	#^B0000000100000000, @#177054	; allow vsync in CPU
+	bic	#^B0001111110000000, @#177716	; sound init (mixer off) 	
+	call	PPTINI		; init pp timer
+
+	; keyboard
+	mov	#KEYBI, @#300
+	
+	mtps	#0
+
+        ; acknowledge start phase 3
+	mov	#PPUYYY, @#177010	
+	mov	#03, @#177014
+
+; //////////////////////////////////////////////////////////////////////////////
+; // MAIN PPU CYCLE
+; //////////////////////////////////////////////////////////////////////////////
+
+MAINCY:	call	MUSPRO
+	call	CMDPRO
+	br	MAINCY
+	
+CMDPRO:	mov	#CMDBUF, @#177010
+	tst	@#177014
+	bne	1$
+	inc	WAIPP0			; 'empty' cycles counter
+	return	
+1$:	mov	#CMDBUF, CMDADR
+	inc	CMDADR	
+CMDPRC:	; check for overflow
+	cmp	CMDADR, #CMDBUF
+	bhis	.+6
+	jmp	@#ERROR
+	cmp	CMDADR, #PPUYYY
+	blo	.+6
+	jmp	@#ERROR
+	; command
+	mov	CMDADR, @#177010
+	mov	@#177014, R5
+	inc	CMDADR
+	tst	R5
+	bne	1$
+	; end of commands
+	mov	#CMDBUF, CMDADR
+	mov	CMDADR, @#177010
+	mov	#0, @#177014
+	return
+1$:	; get command procedure 
+	asl	R5
+	mov	CMDPAD(R5), R5
+	; get parameters (R0..R4) and run
+	mov	CMDADR, @#177010
+	mov	@#177014, R0
+	inc	CMDADR
+	mov	CMDADR, @#177010
+	mov	@#177014, R1
+	inc	CMDADR
+	mov	CMDADR, @#177010
+	mov	@#177014, R2
+	inc	CMDADR
+	mov	CMDADR, @#177010
+	mov	@#177014, R3
+	inc	CMDADR
+	mov	CMDADR, @#177010
+	mov	@#177014, R4
+	inc	CMDADR
+	call	(R5)
+	jmp	@#CMDPRC		; next command
+
+; commands table
+CMDPAD:	.WORD	000000	; 00
+	.WORD	CLEAUP	; 01 cleanup upper RAM
+	.WORD	CLRSC0	; 02 clear plane 0
+	.WORD	PALUPD	; 03 set palette, cursor, resolution, luminance (R0,R1 - palette, R2,R3 - cursor, resolution, lumi)
+	.WORD	SCROLL	; 04 set first disp line of lines table (R0 - num)
+	.WORD	IFPREP	; 05 draw upper interface part 
+	.WORD	DRAPLA	; 06 draw plane
+	.WORD	DRAMIS	; 07 draw missile
+	.WORD	CLEMIS	; 08 clear missile
+	.WORD	DRAFUE	; 09 draw fuel line
+	.WORD	DRAENP	; 10 draw enemy plane
+	.WORD	DRAENX	; 11 draw enemy plane explosion
+	.WORD	SNDSTA	; 12 start sound
+	.WORD	MUSSTA	; 13 start music
+	
+	
+; //////////////////////////////////////////////////////////////////////////////
+; // Procedures
+; //////////////////////////////////////////////////////////////////////////////
+
+; pp timer ready wait
+PPTINI:	clr	@#177710
+	tst	@#177714
+	tst	@#177710
+	bne	PPTINI
+	return
+
+; 01: clean upper RAM
+CLEAUP:	mov	#END, R0
+	mov	#100000-END/2, R2
+	clr	(R0)+
+	sob	R2, .-2
+	return
+
+; 02: clear plane 0
+CLRSC0:	mov	#VADDR, R0
+	mov	#13200, R5	; 26400(8) bytes
+	clr	(R0)+
+	sob	R5, .-2
+	return
+	
+; 03: pallete, resolution, cursor, luminance change
+PALUPD:	mov	R0, VLinesBegin
+	mov	R1, VLinesBegin+2
+	mov	R2, VLinesBegin+10
+	mov	R3, VLinesBegin+12
+	return
+
+; 04: set offset in lines table (to scroll display) R0 = 0..223
+SCROLL:	mov	#WAIPPU, @#177010	; fix empty cycles for debug 
+	mov	WAIPP0, @#177014	;
+	clr	WAIPP0
+	;
+	mov	R0, SCROLY
+	asl	R0
+	asl	R0
+	add	#VLinesBegin+520, R0
+	mov	R0, VLinesBegin+516
+	; clear first line of plane 0
+	mov	(R0), R0	; vaddr from line table
+	mov	#20., R3	; 20 words, 40 bytes
+	clr	(R0)+		; plane 0 is mapped to RAM
+	sob	R3, .-2
+	return
+
+; // GAME DRAWINGS /////////////////////////////////////////////////////////////
+
+; 05: draw upper interface part
+IFPREP:	; 2lines
+;	mov	#VADDR, R5
+;	add	#<62.*40.>, R5
+;	mov	#177777, R0
+;	mov	#40., R3
+;	mov	R0, (R5)+
+;	sob	R3, .-2	
+	return
+
+; 06: draw plane
+; R0-dir (0-normal, 1-right, 2-left, 3-expl1, 4-expl2, 5-clear), R1-X, R2-Y
+DRAPLA:	mov	#288., R3
+	sub	R2, R3			; R3 - lines to cross vaddr boundary
+	mov	#VADDR, R5
+	mov	R2, R4			; R2*40 = R2*32 + R2*8
+	ash	#3, R4
+	add	R4, R5
+	asl	R4
+	asl	R4
+	add	R4, R5
+	mov	R1, R4
+	ash	#-3., R4		; R4 = X-coarse
+	add	R4, R5			; vaddr -> R5
+	; if need to clear plane
+	cmp	R0, #5.
+	bne	8$
+	; clear plane ///
+	mov	#16., R2
+2$:	clrb	(R5)+
+	clrb	(R5)+
+	clrb	(R5)
+	; + test for crossing boundary
+	dec	R3
+	beq	3$
+	; +
+	add	#38., R5
+	sob	R2, 2$
+	return
+3$:	sub	#21332, R5		; (288-64)*40 - 38
+	sob	R2, 2$
+	return
+	; ///////////////
+8$:	; if plane is exploding
+	cmp	R0, #2.
+	ble	10$
+	mov	#BSPL05, R4
+	cmp	R0, #3.
+	ble	12$
+	mov	#BSPL06, R4
+	br	12$
+10$:	asl	R0
+	mov	BSPL0(R0), R4
+12$:	bic	#^B1111111111111000, R1	; X-fine
+	asl	R1
+	add	R1, R4
+	mov	(R4), R4		; preshifted sprite addr -> R4
+	; (!) sprite can cross vaddr boundary (!)
+	mov	#16., R2
+20$:	movb	(R4)+, (R5)+
+	movb	(R4)+, (R5)+
+	movb	(R4)+, (R5)
+	; + need to test for maximal vadr and loop to line-64
+	dec	R3
+	beq	30$
+	; +
+	add	#38., R5
+	sob	R2, 20$
+	return
+30$:	sub	#21332, R5		; (288-64)*40 - 38
+	sob	R2, 20$
+	return
+	
+; 07: draw missile
+; R1-X, R2-Y (if X==1 - do not draw it)
+DRAM03:	.WORD	0	; current distance to boundary
+DRAM05:	.WORD	0	; current vaddr
+DRAM13:	.WORD	0	; previous distance to boundary
+DRAM15:	.WORD	0	; previous vaddr
+DRAMIS:	mov	DRAM03, DRAM13		; rotate previous vaddr and boundary
+	mov	DRAM05, DRAM15
+	; do we need to draw at all?
+	cmp	R1, #1
+	beq	99$
+	; make y-coord
+	mov	SCROLY, R5
+	sub	R2, R5
+	add	#64., R5
+5$:	cmp	R5, #64.
+	bge	10$
+	add	#224., R5
+	br	5$
+10$:	cmp	R5, #288.
+	blt	12$
+	sub	#288., R5
+	br	10$
+12$:	; R5 = Y-coord
+	mov	R5, R2
+	mov	#288., R3
+	sub	R2, R3			; R3 - lines to cross vaddr boundary
+	mov	#VADDR, R5
+	mov	R2, R4			; R2*40 = R2*32 + R2*8
+	ash	#3, R4
+	add	R4, R5
+	asl	R4
+	asl	R4
+	add	R4, R5
+	mov	R1, R4
+	ash	#-3., R4		; R4 = X-coarse
+	add	R4, R5			; vaddr -> R5
+	mov	#BSPL03, R4
+	bic	#^B1111111111111000, R1	; X-fine
+	asl	R1
+	add	R1, R4
+	mov	(R4), R4		; preshifted sprite addr -> R4
+	; (!) sprite can cross vaddr boundary (!)
+	mov	R3, DRAM03		; save for clearing later
+	mov	R5, DRAM05
+	mov	#6., R2
+20$:	movb	(R4)+, (R5)+
+	movb	(R4)+, (R5)
+	; + need to test for maximal vadr and loop to line-64
+	dec	R3
+	beq	30$
+	; +
+	add	#39., R5
+	sob	R2, 20$
+	return
+30$:	sub	#21331, R5		; (288-64)*40 - 39
+	sob	R2, 20$
+99$:	return
+
+
+; 08: clear previously drawn missile
+; 
+CLEMIS:	mov	DRAM13, R3
+	mov	DRAM15, R5
+	beq	99$
+	mov	#6., R2
+20$:	clrb	(R5)+
+	clrb	(R5)
+	dec	R3
+	beq	30$
+	add	#39., R5
+	sob	R2, 20$
+	return
+30$:	sub	#21331, R5
+	sob	R2, 20$
+99$:	return
+
+
+; 09: draw fuel
+; R1-X, R2-Y
+DRAFUE:	mov	#VADDR, R5
+	mov	R2, R4			; R2*40 = R2*32 + R2*8
+	ash	#3, R4
+	add	R4, R5
+	asl	R4
+	asl	R4
+	add	R4, R5
+	mov	R1, R4
+	ash	#-3., R4		; R4 = X-coarse
+	add	R4, R5			; vaddr -> R5
+	mov	#BSPL04, R4
+	bic	#^B1111111111111000, R1	; X-fine
+	asl	R1
+	add	R1, R4
+	mov	(R4), R4		; preshifted sprite addr -> R4
+	mov	#12., R3
+10$:	movb	(R4)+, (R5)+
+	movb	(R4)+, (R5)
+	add	#39., R5
+	sob	R3, 10$
+	return
+	
+
+; draw or clear enemy plane
+; R1-X, R2-vaddr, R3-lines to draw/clear
+DRAENP:	tst	R3			; just in case (must not happen though)
+	ble	99$
+	tst	R1
+	beq	20$
+	bic	#^B1111111111111000, R1
+	asl	R1
+	mov	BSPL70(R1), R4
+10$:	movb	(R4)+, (R2)+
+	movb	(R4)+, (R2)+
+	movb	(R4)+, (R2)
+	add	#38., R2
+	sob	R3, 10$
+	return
+20$:	; clear plane if X-coord == 0
+	clrb	(R2)+
+	clrb	(R2)+
+	clrb	(R2)
+	add	#38., R2
+	sob	R3, 20$
+99$:	return
+
+
+; draw or clear enemy plane explosion
+; R0-number (0..2), R1-X, R2-vaddr, R3-lines to draw/clear
+DRAENX:	tst	R3			; just in case (must not happen though)
+	ble	99$
+	tst	R1
+	beq	20$
+	bic	#^B1111111111111000, R1
+	asl	R1
+	mov	BSPL72(R1), R4		; explosion #0|#2
+	cmp	R0, #1
+	bne	10$
+	mov	BSPL73(R1), R4		; explosion #1
+10$:	movb	(R4)+, (R2)+
+	movb	(R4)+, (R2)+
+	movb	(R4)+, (R2)
+	add	#38., R2
+	sob	R3, 10$
+	return
+20$:	; clear explosion if X-coord == 0
+	clrb	(R2)+
+	clrb	(R2)+
+	clrb	(R2)
+	add	#38., R2
+	sob	R3, 20$
+99$:	return
+	
+
+; //////////////////////////////////////////////////////////////////////////////
+; // sound and music
+; //////////////////////////////////////////////////////////////////////////////
+
+MUSCUR:	.WORD	0 
+MUSADR:	.WORD	0
+SNDADR:	.WORD	0
+
+; music list addrs
+MUSTAB:	.WORD	0, MUS001
+; sound list addrs
+SNDTAB:	.WORD	0, SND001, SND002, SND003, SND004
+
+.radix 10
+
+; notes (TODO: need correction a bit, some notes are sounding not that right)
+NOTPAD:	.WORD	1000
+	.WORD	956, 902, 851, 804, 758, 716, 676, 638, 602, 568, 536, 506
+	.WORD	478, 451, 426, 402, 379, 358, 338, 319, 301, 284, 268, 253
+	.WORD	239, 225, 213, 201, 190, 179, 169, 159, 150, 145, 134, 127
+	.WORD	119, 113, 106, 100, 95,  89,  84,  80,  75,  73,  67,  63
+
+; C             D             E      F             G             A             B
+; C4-37  C#4-38 D4-39  D#4-40 E4-41  F4-42  F#4-43 G4-44  G#4-45 A4-46  A#4-47 B4-48
+; C3-25  C#3-26 D3-27  D#3-28 E3-29  F3-30  F#3-31 G3-32  G#3-33 A3-34  A#3-35 B3-36
+; C2-13  C#2-14 D2-15  D#2-16 E2-17  F2-18  F#2-19 G2-20  G#2-21 A2-22  A#2-23 B2-24
+; C1-01  C#1-02 D1-03  D#1-04 E1-05  F1-06  F#1-07 G1-08  G#1-09 A1-10  A#1-11 B1-12
+
+.radix 8
+
+; mus processor
+MUSPRO:	tst	MUSCUR			; current note addr
+	bne	1$			; are we are playing?
+	return				; no - return
+1$:	mov	#VSY2CN, @#177010
+	cmp	@#177014, #1		; was #2 vsync?
+	bhi	2$
+	return
+2$:	mov	#VSY2CN, @#177010
+	clr	@#177014
+	;	
+	mtps	#600
+	mov	MUSCUR, R0
+	mov	(R0)+, R1		; note id
+	bne	20$
+	call	PPTINI
+	clr	MUSCUR
+	mtps	#0
+	return
+20$:	asl	R1
+	mov	NOTPAD(R1), @#177712	; play it
+	tst	@#177714
+	mov	R0, MUSCUR
+	mtps	#0
+	return
+
+; start sound, R0 - sound ID in SNDTAB list
+SNDSTA:	mtps	#600
+	call	PPTINI
+	asl	R0
+	mov	SNDTAB(R0), R0
+	beq	99$
+	mov	(R0)+, R1
+	beq	99$
+	mov	R0, SNDADR
+	mov	R1, @#177712		; load counter
+	tst	@#177714
+	mov	#SNDINT, @#304		; set sound int
+	bis	#^B01000001, @#177710	; allow int, start, timer = 2mks, 500000 ticks per second
+99$:	mtps	#0
+	return
+
+; start music, R0 - addr
+MUSSTA:	mtps	#600
+	call	PPTINI			; init pp timer
+	tst	R0			; 0 - stop music
+	bne	10$
+	clr	MUSCUR
+	mtps	#0
+	return
+10$:	asl	R0
+	mov	MUSTAB(R0), R0		; addr from music table
+	mov	(R0)+, R1
+	asl	R1
+	mov	NOTPAD(R1), R1
+	mov	R1, @#177712		; initial counter
+	mov	R0, MUSCUR		; second note addr
+	tst	@#177714
+	mov	#MUSIN0, @#304		; set music interrupt
+	bis	#^B01000001, @#177710	; allow int, start, timer = 2mks, 500000 ticks per second
+	mtps	#0
+	return
+
+; PP timer interrupt (for pulse-width modulation)
+SNDINT:	mov	R0, -(SP)
+	mov	#200, R0
+	xor	R0, @#177716
+	mov	@SNDADR, R0
+	beq	90$
+	mov	R0, @#177712
+	add	#2, SNDADR
+	tst	@#177714
+	mov	(SP)+, R0
+	rti
+90$:	clr	@#177710		; stop timer and ints
+	tst	@#177714
+	mov	(SP)+, R0
+	rti
+
+; PP timer interrupts (for tones)
+MUSIN0:	bic	#200, @#177716
+	mov	#MUSIN1, @#304
+	tst	@#177714
+	rti
+MUSIN1:	bis	#200, @#177716
+	mov	#MUSIN0, @#304
+	tst	@#177714
+	rti		
+
+
+; //////////////////////////////////////////////////////////////////////////////
+; // interrupts
+; //////////////////////////////////////////////////////////////////////////////
+
+; request RTICNT to CPU
+REQRCN:	return
+
+; keyboard interrupt
+KEYBI:	mov	R0, -(SP)
+	mov	R1, -(SP)
+	mov	R2, -(SP)
+	mov	@#177010, -(SP)
+	;
+	mov	@#177702, R0		; (!) read this register ONLY ONCE
+	mov	#KEYCUR, @#177010	
+	mov	R0, @#177014	
+	bit	#^B10000000, R0
+	bne	50$
+	; key pressed
+	mov	#KEYSDN, R1
+10$:	tst	(R1)
+	beq	90$
+	cmp	R0, (R1)+
+	beq	20$
+	add	#4, R1
+	br	10$
+20$:	; got our key
+	mov	(R1)+, R2
+	mov	R2, @#177010
+	mov	#1, @#177014
+	mov	(R1)+, R2
+	beq	10$	
+	mov	R2, @#177010
+	clr	@#177014
+	br	10$
+50$:	; key released
+	bic	#^B1111111111110000, R0
+	mov	#KEYSUP, R1
+60$:	tst	(R1)
+	beq	90$
+	cmp	R0, (R1)+
+	beq	70$
+	add	#4, R1
+	br	60$
+70$:	; got our key
+	mov	(R1)+, R2
+	mov	R2, @#177010
+	clr	@#177014
+	mov	(R1)+, R2
+	beq	60$
+	mov	R2, @#177010
+	clr	@#177014
+	br	60$
+	;
+90$:	mov	(SP)+, @#177010
+	mov	(SP)+, R2
+	mov	(SP)+, R1
+	mov	(SP)+, R0
+	rti
+
+
+; ///////////////////////////////////////////////////////////////////////////////
+
+; fatal error
+ERROR:	mtps	#600		; halt mode
+	mov	R0, -(SP)
+	mov	R5, -(SP)
+	mov	R3, -(SP)
+	mov	#VADDR, R5
+	mov	#SPRERR, R0
+	mov	#7., R3
+10$:	movb	(R0)+, (R5)+
+	movb	(R0)+, (R5)+
+	movb	(R0)+, (R5)
+	add	#78., R5
+	sob	R3, 10$
+	mov	(SP)+, R3
+	mov	(SP)+, R5
+	mov	(SP)+, R0
+	br	.
+
+; //////////////////////////////////////////////////////////////////////////////
+; // PPU DATA SECTION //////////////////////////////////////////////////////////
+; //////////////////////////////////////////////////////////////////////////////
+
+CMDADR:	.WORD	0
+
+TEMPR0:	.WORD	0
+TEMPR1:	.WORD	0
+TEMPR2:	.WORD	0
+TEMPR3:	.WORD	0
+TEMPR4:	.WORD	0
+TEMPR5:	.WORD	0
+
+WAIPP0:	.WORD	0
+
+SCROLY:	.WORD	0
+
+; keys release - clear next addrs
+KEYSUP:	.WORD	^B0100, KEYSTP, 0	; STOP
+	.WORD	^B1010, KEYUST, 0	; UST
+	.WORD	^B1000, KEY1,   0	; 1
+	.WORD	^B1001, KEY2,   0	; 2
+	.WORD	^B1010, KEY3,   0	; 3
+	.WORD	^B1011, KEY4,   0	; 4
+	.WORD	^B1011, KEYSPC, 0	; SPACE
+	.WORD	^B1100, KEYDWN, KEYUP	; UP/DOWN
+	.WORD	^B1110, KEYLFT, 0	; LEFT
+	.WORD	^B1011, KEYRHT, 0	; RIGHT
+	.WORD	^B1000, KEYK1,  0	; K1
+	.WORD	^B1001, KEYK2,  0	; K2
+	.WORD	^B0101, KEYSHI, 0	; SHIFT
+	.WORD	0
+	
+; keys press - set 1st addr, clear second
+KEYSDN:	.WORD	^B00000100, KEYSTP, 0		; STOP
+	.WORD	^B01101010, KEYUST, 0		; UST
+	.WORD	^B00011000, KEY1,   0		; 1
+	.WORD	^B00011001, KEY2,   0		; 2
+	.WORD	^B00011010, KEY3,   0		; 3
+	.WORD	^B00001011, KEY4,   0		; 4
+	.WORD	^B01001011, KEYSPC, 0		; SPACE
+	.WORD	^B01011100, KEYDWN, KEYUP	; DOWN
+	.WORD	^B01101100, KEYUP,  KEYDWN	; UP
+	.WORD	^B01001110, KEYLFT, KEYRHT	; LEFT
+	.WORD	^B01011011, KEYRHT, KEYLFT	; RIGHT
+	.WORD	^B00001000, KEYK1,  0		; K1
+	.WORD	^B00001001, KEYK2,  0		; K2
+	.WORD	^B01000101, KEYSHI, 0		; SHIFT
+	.WORD	0
+	
+SPRERR:	.BYTE	177, 177, 177, 101, 101, 101, 175, 135, 135, 101, 101, 101
+	.BYTE	175, 165, 165, 101, 155, 155, 177, 177, 177, 0
+
+; // SOUND & MUSIC //////////////////////////////////////////////////////////////
+
+.radix 10
+
+; C             D             E      F             G             A             B
+; C4-37 C#4-38  D4-39 D#4-40  E4-41  F4-42 F#4-43  G4-44 G#4-45  A4-46 A#4-47  B4-48
+; C3-25 C#3-26  D3-27 D#3-28  E3-29  F3-30 F#3-31  G3-32 G#3-33  A3-34 A#3-35  B3-36
+; C2-13 C#2-14  D2-15 D#2-16  E2-17  F2-18 F#2-19  G2-20 G#2-21  A2-22 A#2-23  B2-24
+; C1-01 C#1-02  D1-03 D#1-04  E1-05  F1-06 F#1-07  G1-08 G#1-09  A1-10 A#1-11  B1-12
+
+; music #1
+MUS001:	.WORD	10, 13, 17
+	.WORD	10, 13, 17
+	.WORD	10, 13, 17
+	.WORD	10, 15, 18
+
+	.WORD	10, 13, 17
+	.WORD	10, 13, 17
+	.WORD	10, 13, 17
+	.WORD	10, 13, 17
+
+	.WORD	01, 10, 13
+	.WORD	01, 10, 13
+	.WORD	03, 09, 12
+	.WORD	03, 09, 12
+
+	.WORD	01, 05, 10
+	.WORD	01, 05, 10
+	.WORD	01, 05, 10
+	.WORD	01, 05, 10
+	
+	.WORD	03, 05, 09
+	.WORD	03, 05, 09
+	.WORD	01, 05, 10
+	.WORD	01, 05, 10
+
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+	.WORD	03, 05, 09
+	.WORD	03, 05, 09
+
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+	.WORD	05, 09, 12
+
+	.WORD	09, 12, 17
+	.WORD	09, 12, 17
+	.WORD	09, 12, 17
+	.WORD	09, 12, 18
+	
+	.WORD	09, 12, 17
+	.WORD	09, 12, 17
+	.WORD	09, 12, 17
+	.WORD	09, 12, 17
+	
+	.WORD	09, 12, 16
+	.WORD	09, 12, 16
+	.WORD	09, 12, 17
+	.WORD	09, 12, 17
+
+	.WORD	17, 21, 24
+	.WORD	17, 21, 24
+	.WORD	17, 21, 24
+	.WORD	17, 21, 24
+
+	.WORD	17, 21, 25
+	.WORD	17, 21, 25
+	.WORD	17, 21, 25
+	.WORD	17, 21, 24
+
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	.WORD	13, 17, 22
+	
+	.WORD	0, 0
+
+; missile fire
+SND001:
+	.WORD	236, 209, 680, 658, 677, 660, 675, 662, 673
+	.WORD	663, 672, 665, 687, 712, 719, 713, 718, 714, 717, 714, 717, 715, 716, 715, 748
+	.WORD	763, 763, 764, 763, 764, 762, 765, 762, 764, 763, 796, 810, 812, 810, 812, 810
+	.WORD	812, 810, 813, 809, 829, 857, 860, 858, 860, 857, 860, 858, 860, 857, 892, 905
+	.WORD	908, 905, 908, 905, 908, 905, 908, 937, 956, 953, 955, 953, 955, 953, 956, 953
+	.WORD	1003, 1001, 1003, 1001, 1002, 1001, 1003, 1001, 1035, 1049, 1050, 1049, 1050, 1049, 1050, 1049
+	.WORD	1082, 1097, 1098, 1097, 1098, 1096, 1098, 1097, 1146, 1144, 1146, 1144, 1146, 1144, 1146, 1176
+	.WORD	1193, 1193, 1193, 1192, 1193, 1193, 1225, 1240, 1241, 1240, 1240, 1241, 1240, 1288, 1289, 1287
+	.WORD	1289, 1288, 1288, 1320, 1336, 1336, 1336, 1335, 1337, 1033
+	.WORD	0
+
+; boom
+SND002:
+	.WORD	859, 506, 511, 507, 1527, 510, 508, 509, 509, 1526, 510, 1017, 510, 2033, 1021
+	.WORD	1015, 1529, 2002, 495, 491, 1973, 494, 984, 495, 984, 988, 968, 480, 475, 1909, 1431
+	.WORD	478, 1906, 1879, 4004, 2230, 1826, 497, 2460, 1484, 490, 496, 1475, 990, 919, 926, 458
+	.WORD	2307, 462, 921, 463, 460, 462, 921, 1242, 413, 827, 414, 413, 1240, 1654, 827, 2097
+	.WORD	863, 855, 433, 855, 1291, 428, 431, 428, 430, 429, 859, 429, 1383, 1384, 1383, 924
+	.WORD	461, 922, 462, 460, 462, 461, 398, 1191, 1194, 397, 796, 795, 1192, 399, 1191, 400
+	.WORD	3287, 420, 1647, 421, 1233, 834, 1679, 436, 853, 1293, 855, 433, 426, 433, 426, 432
+	.WORD	427, 861, 1810, 926, 458, 1846, 462, 461, 922, 922, 462, 1763, 798, 395, 1195, 397
+	.WORD	398, 397, 1590, 399, 396, 399, 396, 812, 413, 414, 826, 2481, 415, 825, 829, 412
+	.WORD	828, 413, 891, 445, 446, 889, 447, 2669, 894, 442, 893, 937, 495, 491, 495, 491
+	.WORD	987, 985, 987, 985, 3355, 925, 1381, 925, 920, 464, 458, 464, 1380, 831, 410, 417
+	.WORD	823, 417, 411, 2895, 415, 412, 1241, 444, 447, 889, 1337, 1335, 447, 444, 446, 889
+	.WORD	892, 445, 446, 1017, 1018, 2035, 1527, 2543, 498, 1472, 500, 487, 2468, 985, 495, 492
+	.WORD	493, 811
+	.WORD	0
+
+; fueling
+SND003:	.WORD	550, 450, 549, 451, 548, 452, 547, 453, 546, 454, 545, 455, 544, 456, 543, 457, 542, 458, 541, 459
+	.WORD	540, 460, 539, 461, 538, 462, 537, 463, 536, 464, 535, 465, 534, 466, 533, 467, 532, 468, 531, 469
+	.WORD	530, 470, 529, 471, 528, 472, 527, 473, 526, 474, 525, 475, 524, 476, 523, 477, 522, 478, 521, 479
+	.WORD	520, 480, 519, 481, 518, 482, 517, 483, 516, 484, 515, 485, 514, 486, 513, 487, 512, 488, 511, 489
+	.WORD	510, 490, 509, 491, 508, 492, 507, 493, 506, 494, 505, 495, 504, 496, 503, 497, 502, 498, 501, 499
+	.WORD	500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500
+	.WORD	0  
+
+; fueling full
+SND004:	.WORD	300, 200, 298, 202, 296, 204, 294, 206, 292, 208
+	.WORD	290, 210, 288, 212, 286, 214, 284, 216, 282, 218
+	.WORD	280, 220, 278, 222, 276, 224, 274, 226, 272, 228
+	.WORD	270, 230, 268, 232, 266, 234, 264, 236, 262, 238
+	.WORD	260, 240, 258, 242, 256, 244, 254, 246, 252, 248
+	.WORD	250, 250, 248, 252, 246, 254, 244, 256, 242, 258
+	.WORD	240, 260, 238, 262, 236, 264, 234, 266, 232, 268
+	.WORD	230, 270, 228, 272, 226, 274, 224, 276, 222, 278
+	.WORD	220, 280, 218, 282, 216, 284, 214, 286, 212, 288
+	.WORD	210, 290, 208, 292, 206, 294, 204, 296, 202, 298
+	.WORD	200, 300, 200, 300, 200, 300, 200, 300, 200, 300	
+	.WORD	0
+
+
+.radix 8
+
+
+; // SPRITES ////////////////////////////////////////////////////////////////////
+
+; plane 16 x 14
+BSPL0:	.WORD	BSPL00, BSPL01, BSPL02
+BSPL00:	.WORD	BSP000, BSP001, BSP002, BSP003, BSP004, BSP005, BSP006, BSP007
+BSPL01:	.WORD	BSP010, BSP011, BSP012, BSP013, BSP014, BSP015, BSP016, BSP017
+BSPL02:	.WORD	BSP020, BSP021, BSP022, BSP023, BSP024, BSP025, BSP026, BSP027
+
+BSP000:	.BYTE	0, 3, 0, 0, 3, 0, 0, 3
+	.BYTE	0, 300, 17, 0, 360, 77, 0, 374
+	.BYTE	377, 0, 374, 377, 0, 74, 363, 0
+	.BYTE	14, 303, 0, 0, 3, 0, 300, 17
+	.BYTE	0, 360, 77, 0, 60, 63, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP001:	.BYTE	0, 6, 0, 0, 6, 0, 0, 6
+	.BYTE	0, 200, 37, 0, 340, 177, 0, 370
+	.BYTE	377, 1, 370, 377, 1, 170, 346, 1
+	.BYTE	30, 206, 1, 0, 6, 0, 200, 37
+	.BYTE	0, 340, 177, 0, 140, 146, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP002:	.BYTE	0, 14, 0, 0, 14, 0, 0, 14
+	.BYTE	0, 0, 77, 0, 300, 377, 0, 360
+	.BYTE	377, 3, 360, 377, 3, 360, 314, 3
+	.BYTE	60, 14, 3, 0, 14, 0, 0, 77
+	.BYTE	0, 300, 377, 0, 300, 314, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP003:	.BYTE	0, 30, 0, 0, 30, 0, 0, 30
+	.BYTE	0, 0, 176, 0, 200, 377, 1, 340
+	.BYTE	377, 7, 340, 377, 7, 340, 231, 7
+	.BYTE	140, 30, 6, 0, 30, 0, 0, 176
+	.BYTE	0, 200, 377, 1, 200, 231, 1, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP004:	.BYTE	0, 60, 0, 0, 60, 0, 0, 60
+	.BYTE	0, 0, 374, 0, 0, 377, 3, 300
+	.BYTE	377, 17, 300, 377, 17, 300, 63, 17
+	.BYTE	300, 60, 14, 0, 60, 0, 0, 374
+	.BYTE	0, 0, 377, 3, 0, 63, 3, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP005:	.BYTE	0, 140, 0, 0, 140, 0, 0, 140
+	.BYTE	0, 0, 370, 1, 0, 376, 7, 200
+	.BYTE	377, 37, 200, 377, 37, 200, 147, 36
+	.BYTE	200, 141, 30, 0, 140, 0, 0, 370
+	.BYTE	1, 0, 376, 7, 0, 146, 6, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP006:	.BYTE	0, 300, 0, 0, 300, 0, 0, 300
+	.BYTE	0, 0, 360, 3, 0, 374, 17, 0
+	.BYTE	377, 77, 0, 377, 77, 0, 317, 74
+	.BYTE	0, 303, 60, 0, 300, 0, 0, 360
+	.BYTE	3, 0, 374, 17, 0, 314, 14, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP007:	.BYTE	0, 200, 1, 0, 200, 1, 0, 200
+	.BYTE	1, 0, 340, 7, 0, 370, 37, 0
+	.BYTE	376, 177, 0, 376, 177, 0, 236, 171
+	.BYTE	0, 206, 141, 0, 200, 1, 0, 340
+	.BYTE	7, 0, 370, 37, 0, 230, 31, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+
+BSP010:	.BYTE	0, 3, 0, 0, 3, 0, 0, 3
+	.BYTE	0, 300, 3, 0, 360, 17, 0, 360
+	.BYTE	77, 0, 360, 77, 0, 60, 77, 0
+	.BYTE	0, 63, 0, 0, 3, 0, 300, 3
+	.BYTE	0, 360, 17, 0, 60, 77, 0, 0
+	.BYTE	60, 0, 0, 0, 0, 0, 0, 0
+BSP011:	.BYTE	0, 6, 0, 0, 6, 0, 0, 6
+	.BYTE	0, 200, 7, 0, 340, 37, 0, 340
+	.BYTE	177, 0, 340, 177, 0, 140, 176, 0
+	.BYTE	0, 146, 0, 0, 6, 0, 200, 7
+	.BYTE	0, 340, 37, 0, 140, 176, 0, 0
+	.BYTE	140, 0, 0, 0, 0, 0, 0, 0
+BSP012:	.BYTE	0, 14, 0, 0, 14, 0, 0, 14
+	.BYTE	0, 0, 17, 0, 300, 77, 0, 300
+	.BYTE	377, 0, 300, 377, 0, 300, 374, 0
+	.BYTE	0, 314, 0, 0, 14, 0, 0, 17
+	.BYTE	0, 300, 77, 0, 300, 374, 0, 0
+	.BYTE	300, 0, 0, 0, 0, 0, 0, 0
+BSP013:	.BYTE	0, 30, 0, 0, 30, 0, 0, 30
+	.BYTE	0, 0, 36, 0, 200, 177, 0, 200
+	.BYTE	377, 1, 200, 377, 1, 200, 371, 1
+	.BYTE	0, 230, 1, 0, 30, 0, 0, 36
+	.BYTE	0, 200, 177, 0, 200, 371, 1, 0
+	.BYTE	200, 1, 0, 0, 0, 0, 0, 0
+BSP014:	.BYTE	0, 60, 0, 0, 60, 0, 0, 60
+	.BYTE	0, 0, 74, 0, 0, 377, 0, 0
+	.BYTE	377, 3, 0, 377, 3, 0, 363, 3
+	.BYTE	0, 60, 3, 0, 60, 0, 0, 74
+	.BYTE	0, 0, 377, 0, 0, 363, 3, 0
+	.BYTE	0, 3, 0, 0, 0, 0, 0, 0
+BSP015:	.BYTE	0, 140, 0, 0, 140, 0, 0, 140
+	.BYTE	0, 0, 170, 0, 0, 376, 1, 0
+	.BYTE	376, 7, 0, 376, 7, 0, 346, 7
+	.BYTE	0, 140, 6, 0, 140, 0, 0, 170
+	.BYTE	0, 0, 376, 1, 0, 346, 7, 0
+	.BYTE	0, 6, 0, 0, 0, 0, 0, 0
+BSP016:	.BYTE	0, 300, 0, 0, 300, 0, 0, 300
+	.BYTE	0, 0, 360, 0, 0, 374, 3, 0
+	.BYTE	374, 17, 0, 374, 17, 0, 314, 17
+	.BYTE	0, 300, 14, 0, 300, 0, 0, 360
+	.BYTE	0, 0, 374, 3, 0, 314, 17, 0
+	.BYTE	0, 14, 0, 0, 0, 0, 0, 0
+BSP017:	.BYTE	0, 200, 1, 0, 200, 1, 0, 200
+	.BYTE	1, 0, 340, 1, 0, 370, 7, 0
+	.BYTE	370, 37, 0, 370, 37, 0, 230, 37
+	.BYTE	0, 200, 31, 0, 200, 1, 0, 340
+	.BYTE	1, 0, 370, 7, 0, 230, 37, 0
+	.BYTE	0, 30, 0, 0, 0, 0, 0, 0
+
+BSP020:	.BYTE	0, 3, 0, 0, 3, 0, 0, 3
+	.BYTE	0, 0, 17, 0, 300, 77, 0, 360
+	.BYTE	77, 0, 360, 77, 0, 360, 63, 0
+	.BYTE	60, 3, 0, 0, 3, 0, 0, 17
+	.BYTE	0, 300, 77, 0, 360, 63, 0, 60
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP021:	.BYTE	0, 6, 0, 0, 6, 0, 0, 6
+	.BYTE	0, 0, 36, 0, 200, 177, 0, 340
+	.BYTE	177, 0, 340, 177, 0, 340, 147, 0
+	.BYTE	140, 6, 0, 0, 6, 0, 0, 36
+	.BYTE	0, 200, 177, 0, 340, 147, 0, 140
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP022:	.BYTE	0, 14, 0, 0, 14, 0, 0, 14
+	.BYTE	0, 0, 74, 0, 0, 377, 0, 300
+	.BYTE	377, 0, 300, 377, 0, 300, 317, 0
+	.BYTE	300, 14, 0, 0, 14, 0, 0, 74
+	.BYTE	0, 0, 377, 0, 300, 317, 0, 300
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP023:	.BYTE	0, 30, 0, 0, 30, 0, 0, 30
+	.BYTE	0, 0, 170, 0, 0, 376, 1, 200
+	.BYTE	377, 1, 200, 377, 1, 200, 237, 1
+	.BYTE	200, 31, 0, 0, 30, 0, 0, 170
+	.BYTE	0, 0, 376, 1, 200, 237, 1, 200
+	.BYTE	1, 0, 0, 0, 0, 0, 0, 0
+BSP024:	.BYTE	0, 60, 0, 0, 60, 0, 0, 60
+	.BYTE	0, 0, 360, 0, 0, 374, 3, 0
+	.BYTE	377, 3, 0, 377, 3, 0, 77, 3
+	.BYTE	0, 63, 0, 0, 60, 0, 0, 360
+	.BYTE	0, 0, 374, 3, 0, 77, 3, 0
+	.BYTE	3, 0, 0, 0, 0, 0, 0, 0
+BSP025:	.BYTE	0, 140, 0, 0, 140, 0, 0, 140
+	.BYTE	0, 0, 340, 1, 0, 370, 7, 0
+	.BYTE	376, 7, 0, 376, 7, 0, 176, 6
+	.BYTE	0, 146, 0, 0, 140, 0, 0, 340
+	.BYTE	1, 0, 370, 7, 0, 176, 6, 0
+	.BYTE	6, 0, 0, 0, 0, 0, 0, 0
+BSP026:	.BYTE	0, 300, 0, 0, 300, 0, 0, 300
+	.BYTE	0, 0, 300, 3, 0, 360, 17, 0
+	.BYTE	374, 17, 0, 374, 17, 0, 374, 14
+	.BYTE	0, 314, 0, 0, 300, 0, 0, 300
+	.BYTE	3, 0, 360, 17, 0, 374, 14, 0
+	.BYTE	14, 0, 0, 0, 0, 0, 0, 0
+BSP027:	.BYTE	0, 200, 1, 0, 200, 1, 0, 200
+	.BYTE	1, 0, 200, 7, 0, 340, 37, 0
+	.BYTE	370, 37, 0, 370, 37, 0, 370, 31
+	.BYTE	0, 230, 1, 0, 200, 1, 0, 200
+	.BYTE	7, 0, 340, 37, 0, 370, 31, 0
+	.BYTE	30, 0, 0, 0, 0, 0, 0, 0
+
+; missile
+BSPL03:	.WORD	BSP030, BSP031, BSP032, BSP033, BSP034, BSP035, BSP036, BSP037
+BSP030:	.BYTE	3, 0, 3, 0, 3, 0, 3, 0
+	.BYTE	3, 0, 3, 0
+BSP031:	.BYTE	6, 0, 6, 0, 6, 0, 6, 0
+	.BYTE	6, 0, 6, 0
+BSP032:	.BYTE	14, 0, 14, 0, 14, 0, 14, 0
+	.BYTE	14, 0, 14, 0
+BSP033:	.BYTE	30, 0, 30, 0, 30, 0, 30, 0
+	.BYTE	30, 0, 30, 0
+BSP034:	.BYTE	60, 0, 60, 0, 60, 0, 60, 0
+	.BYTE	60, 0, 60, 0
+BSP035:	.BYTE	140, 0, 140, 0, 140, 0, 140, 0
+	.BYTE	140, 0, 140, 0
+BSP036:	.BYTE	300, 0, 300, 0, 300, 0, 300, 0
+	.BYTE	300, 0, 300, 0
+BSP037:	.BYTE	200, 1, 200, 1, 200, 1, 200, 1
+	.BYTE	200, 1, 200, 1 
+
+; fuel gauge line
+BSPL04:	.WORD	BSP040, BSP041, BSP042, BSP043, BSP044, BSP045, BSP046, BSP047
+BSP040:	.BYTE	74, 0, 74, 0, 74, 0, 74, 0
+	.BYTE	74, 0, 74, 0, 74, 0, 74, 0
+	.BYTE	74, 0, 74, 0, 74, 0, 74, 0
+BSP041:	.BYTE	170, 0, 170, 0, 170, 0, 170, 0
+	.BYTE	170, 0, 170, 0, 170, 0, 170, 0
+	.BYTE	170, 0, 170, 0, 170, 0, 170, 0
+BSP042:	.BYTE	360, 0, 360, 0, 360, 0, 360, 0
+	.BYTE	360, 0, 360, 0, 360, 0, 360, 0
+	.BYTE	360, 0, 360, 0, 360, 0, 360, 0
+BSP043:	.BYTE	340, 1, 340, 1, 340, 1, 340, 1
+	.BYTE	340, 1, 340, 1, 340, 1, 340, 1
+	.BYTE	340, 1, 340, 1, 340, 1, 340, 1
+BSP044:	.BYTE	300, 3, 300, 3, 300, 3, 300, 3
+	.BYTE	300, 3, 300, 3, 300, 3, 300, 3
+	.BYTE	300, 3, 300, 3, 300, 3, 300, 3
+BSP045:	.BYTE	200, 7, 200, 7, 200, 7, 200, 7
+	.BYTE	200, 7, 200, 7, 200, 7, 200, 7
+	.BYTE	200, 7, 200, 7, 200, 7, 200, 7
+BSP046:	.BYTE	0, 17, 0, 17, 0, 17, 0, 17
+	.BYTE	0, 17, 0, 17, 0, 17, 0, 17
+	.BYTE	0, 17, 0, 17, 0, 17, 0, 17
+BSP047:	.BYTE	0, 36, 0, 36, 0, 36, 0, 36
+	.BYTE	0, 36, 0, 36, 0, 36, 0, 36
+	.BYTE	0, 36, 0, 36, 0, 36, 0, 36 
+
+; enemy plane
+BSPL70:	.WORD	BSP700, BSP701, BSP702, BSP703, BSP704, BSP705, BSP706, BSP707
+BSP700:	.BYTE	0, 300, 0, 74, 360, 0, 377, 377
+	.BYTE	0, 377, 60, 0, 300, 17, 0, 0
+	.BYTE	17, 0
+BSP701:	.BYTE	0, 200, 1, 170, 340, 1, 376, 377
+	.BYTE	1, 376, 141, 0, 200, 37, 0, 0
+	.BYTE	36, 0
+BSP702:	.BYTE	0, 0, 3, 360, 300, 3, 374, 377
+	.BYTE	3, 374, 303, 0, 0, 77, 0, 0
+	.BYTE	74, 0
+BSP703:	.BYTE	0, 0, 6, 340, 201, 7, 370, 377
+	.BYTE	7, 370, 207, 1, 0, 176, 0, 0
+	.BYTE	170, 0
+BSP704:	.BYTE	0, 0, 14, 300, 3, 17, 360, 377
+	.BYTE	17, 360, 17, 3, 0, 374, 0, 0
+	.BYTE	360, 0
+BSP705:	.BYTE	0, 0, 30, 200, 7, 36, 340, 377
+	.BYTE	37, 340, 37, 6, 0, 370, 1, 0
+	.BYTE	340, 1
+BSP706:	.BYTE	0, 0, 60, 0, 17, 74, 300, 377
+	.BYTE	77, 300, 77, 14, 0, 360, 3, 0
+	.BYTE	300, 3
+BSP707:	.BYTE	0, 0, 140, 0, 36, 170, 200, 377
+	.BYTE	177, 200, 177, 30, 0, 340, 7, 0
+	.BYTE	200, 7 	
+
+; enemy plane explosion
+BSPL72:	.WORD	BSP720, BSP721, BSP722, BSP723, BSP724, BSP725, BSP726, BSP727
+BSPL73:	.WORD	BSP730, BSP731, BSP732, BSP733, BSP734, BSP735, BSP736, BSP737
+
+BSP720:	.BYTE	0, 0, 0, 300, 60, 0, 6, 6
+	.BYTE	0, 60, 300, 0, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP721:	.BYTE	0, 0, 0, 200, 141, 0, 14, 14
+	.BYTE	0, 140, 200, 1, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP722:	.BYTE	0, 0, 0, 0, 303, 0, 30, 30
+	.BYTE	0, 300, 0, 3, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP723:	.BYTE	0, 0, 0, 0, 206, 1, 60, 60
+	.BYTE	0, 200, 1, 6, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP724:	.BYTE	0, 0, 0, 0, 14, 3, 140, 140
+	.BYTE	0, 0, 3, 14, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP725:	.BYTE	0, 0, 0, 0, 30, 6, 300, 300
+	.BYTE	0, 0, 6, 30, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP726:	.BYTE	0, 0, 0, 0, 60, 14, 200, 201
+	.BYTE	1, 0, 14, 60, 0, 0, 0, 0
+	.BYTE	0, 0
+BSP727:	.BYTE	0, 0, 0, 0, 140, 30, 0, 3
+	.BYTE	3, 0, 30, 140, 0, 0, 0, 0
+	.BYTE	0, 0
+
+BSP730:	.BYTE	143, 60, 0, 200, 15, 0, 14, 300
+	.BYTE	0, 260, 61, 0, 3, 6, 0, 314
+	.BYTE	300, 0
+BSP731:	.BYTE	306, 140, 0, 0, 33, 0, 30, 200
+	.BYTE	1, 140, 143, 0, 6, 14, 0, 230
+	.BYTE	201, 1
+BSP732:	.BYTE	214, 301, 0, 0, 66, 0, 60, 0
+	.BYTE	3, 300, 306, 0, 14, 30, 0, 60
+	.BYTE	3, 3
+BSP733:	.BYTE	30, 203, 1, 0, 154, 0, 140, 0
+	.BYTE	6, 200, 215, 1, 30, 60, 0, 140
+	.BYTE	6, 6
+BSP734:	.BYTE	60, 6, 3, 0, 330, 0, 300, 0
+	.BYTE	14, 0, 33, 3, 60, 140, 0, 300
+	.BYTE	14, 14
+BSP735:	.BYTE	140, 14, 6, 0, 260, 1, 200, 1
+	.BYTE	30, 0, 66, 6, 140, 300, 0, 200
+	.BYTE	31, 30
+BSP736:	.BYTE	300, 30, 14, 0, 140, 3, 0, 3
+	.BYTE	60, 0, 154, 14, 300, 200, 1, 0
+	.BYTE	63, 60
+BSP737:	.BYTE	200, 61, 30, 0, 300, 6, 0, 6
+	.BYTE	140, 0, 330, 30, 200, 1, 3, 0
+	.BYTE	146, 140 
+	
+; player plane explosion
+BSPL05:	.WORD	BSP050, BSP051, BSP052, BSP053, BSP054, BSP055, BSP056, BSP057
+BSPL06:	.WORD	BSP060, BSP061, BSP062, BSP063, BSP064, BSP065, BSP066, BSP067
+
+BSP050:	.BYTE	0, 0, 0, 300, 0, 0, 0, 0
+	.BYTE	0, 0, 30, 0, 140, 0, 0, 0
+	.BYTE	3, 0, 0, 60, 0, 300, 0, 0
+	.BYTE	0, 140, 0, 0, 6, 0, 140, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP051:	.BYTE	0, 0, 0, 200, 1, 0, 0, 0
+	.BYTE	0, 0, 60, 0, 300, 0, 0, 0
+	.BYTE	6, 0, 0, 140, 0, 200, 1, 0
+	.BYTE	0, 300, 0, 0, 14, 0, 300, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP052:	.BYTE	0, 0, 0, 0, 3, 0, 0, 0
+	.BYTE	0, 0, 140, 0, 200, 1, 0, 0
+	.BYTE	14, 0, 0, 300, 0, 0, 3, 0
+	.BYTE	0, 200, 1, 0, 30, 0, 200, 1
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP053:	.BYTE	0, 0, 0, 0, 6, 0, 0, 0
+	.BYTE	0, 0, 300, 0, 0, 3, 0, 0
+	.BYTE	30, 0, 0, 200, 1, 0, 6, 0
+	.BYTE	0, 0, 3, 0, 60, 0, 0, 3
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP054:	.BYTE	0, 0, 0, 0, 14, 0, 0, 0
+	.BYTE	0, 0, 200, 1, 0, 6, 0, 0
+	.BYTE	60, 0, 0, 0, 3, 0, 14, 0
+	.BYTE	0, 0, 6, 0, 140, 0, 0, 6
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP055:	.BYTE	0, 0, 0, 0, 30, 0, 0, 0
+	.BYTE	0, 0, 0, 3, 0, 14, 0, 0
+	.BYTE	140, 0, 0, 0, 6, 0, 30, 0
+	.BYTE	0, 0, 14, 0, 300, 0, 0, 14
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP056:	.BYTE	0, 0, 0, 0, 60, 0, 0, 0
+	.BYTE	0, 0, 0, 6, 0, 30, 0, 0
+	.BYTE	300, 0, 0, 0, 14, 0, 60, 0
+	.BYTE	0, 0, 30, 0, 200, 1, 0, 30
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+BSP057:	.BYTE	0, 0, 0, 0, 140, 0, 0, 0
+	.BYTE	0, 0, 0, 14, 0, 60, 0, 0
+	.BYTE	200, 1, 0, 0, 30, 0, 140, 0
+	.BYTE	0, 0, 60, 0, 0, 3, 0, 60
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+	.BYTE	0, 0, 0, 0, 0, 0, 0, 0
+
+BSP060:	.BYTE	0, 3, 0, 0, 0, 0, 60, 60
+	.BYTE	0, 200, 1, 0, 30, 0, 0, 0
+	.BYTE	146, 0, 140, 0, 0, 0, 0, 0
+	.BYTE	14, 14, 0, 300, 300, 0, 0, 6
+	.BYTE	0, 140, 0, 0, 0, 30, 0, 60
+	.BYTE	3, 0, 0, 0, 0, 0, 0, 0
+BSP061:	.BYTE	0, 6, 0, 0, 0, 0, 140, 140
+	.BYTE	0, 0, 3, 0, 60, 0, 0, 0
+	.BYTE	314, 0, 300, 0, 0, 0, 0, 0
+	.BYTE	30, 30, 0, 200, 201, 1, 0, 14
+	.BYTE	0, 300, 0, 0, 0, 60, 0, 140
+	.BYTE	6, 0, 0, 0, 0, 0, 0, 0
+BSP062:	.BYTE	0, 14, 0, 0, 0, 0, 300, 300
+	.BYTE	0, 0, 6, 0, 140, 0, 0, 0
+	.BYTE	230, 1, 200, 1, 0, 0, 0, 0
+	.BYTE	60, 60, 0, 0, 3, 3, 0, 30
+	.BYTE	0, 200, 1, 0, 0, 140, 0, 300
+	.BYTE	14, 0, 0, 0, 0, 0, 0, 0
+BSP063:	.BYTE	0, 30, 0, 0, 0, 0, 200, 201
+	.BYTE	1, 0, 14, 0, 300, 0, 0, 0
+	.BYTE	60, 3, 0, 3, 0, 0, 0, 0
+	.BYTE	140, 140, 0, 0, 6, 6, 0, 60
+	.BYTE	0, 0, 3, 0, 0, 300, 0, 200
+	.BYTE	31, 0, 0, 0, 0, 0, 0, 0
+BSP064:	.BYTE	0, 60, 0, 0, 0, 0, 0, 3
+	.BYTE	3, 0, 30, 0, 200, 1, 0, 0
+	.BYTE	140, 6, 0, 6, 0, 0, 0, 0
+	.BYTE	300, 300, 0, 0, 14, 14, 0, 140
+	.BYTE	0, 0, 6, 0, 0, 200, 1, 0
+	.BYTE	63, 0, 0, 0, 0, 0, 0, 0
+BSP065:	.BYTE	0, 140, 0, 0, 0, 0, 0, 6
+	.BYTE	6, 0, 60, 0, 0, 3, 0, 0
+	.BYTE	300, 14, 0, 14, 0, 0, 0, 0
+	.BYTE	200, 201, 1, 0, 30, 30, 0, 300
+	.BYTE	0, 0, 14, 0, 0, 0, 3, 0
+	.BYTE	146, 0, 0, 0, 0, 0, 0, 0
+BSP066:	.BYTE	0, 300, 0, 0, 0, 0, 0, 14
+	.BYTE	14, 0, 140, 0, 0, 6, 0, 0
+	.BYTE	200, 31, 0, 30, 0, 0, 0, 0
+	.BYTE	0, 3, 3, 0, 60, 60, 0, 200
+	.BYTE	1, 0, 30, 0, 0, 0, 6, 0
+	.BYTE	314, 0, 0, 0, 0, 0, 0, 0
+BSP067:	.BYTE	0, 200, 1, 0, 0, 0, 0, 30
+	.BYTE	30, 0, 300, 0, 0, 14, 0, 0
+	.BYTE	0, 63, 0, 60, 0, 0, 0, 0
+	.BYTE	0, 6, 6, 0, 140, 140, 0, 0
+	.BYTE	3, 0, 60, 0, 0, 0, 14, 0
+	.BYTE	230, 1, 0, 0, 0, 0, 0, 0 
+	
+
+END:
+
+; // ADDRESSes /////////////////////////////////////////////////////////////////
+
+VADDR =40000	; vaddr (=100000CPU, =40000PPU)
+LINEAD=2120	; lines array
+
+; its ADDR/2 for CPU-PPU exchange
+CMDBUF=67000	; ~450 bytes, 224 words command buffer
+PPUYYY=67700	; PPU state
+
+KEYK2 =67752	; key K2
+KEYSHI=67753	; key SHIFT
+WAIPPU=67754	; PPU wait cycles
+KEY4  =67755
+KEYCOM=67756	; combo keys seq was pressed
+RTICN2=67757
+KEY3  =67760
+KEYK1 =67761
+KEYSTP=67762
+KEYUST=67763
+KEY2  =67764
+KEY1  =67765
+KEYENT=67766
+KEYSPC=67767
+KEYRHT=67770
+KEYLFT=67771
+KEYDWN=67772
+KEYUP =67773
+KEYCUR=67774	; current key
+VSY2CN=67775	; vsync 2 counter
+VSY1CN=67776	; vsync 1 counter
+
+	.even
+PpuEnd:
+	.END	START
