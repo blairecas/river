@@ -8,6 +8,8 @@ php -f ./scripts/conv_fnt.php
 if %ERRORLEVEL% NEQ 0 ( exit /b )
 php -f ./scripts/conv_spr.php
 if %ERRORLEVEL% NEQ 0 ( exit /b )
+php -f ./scripts/conv_menu_img.php ./graphics/menu/mig.png
+if %ERRORLEVEL% NEQ 0 ( exit /b )
 
 echo.
 echo ===========================================================================

@@ -34,7 +34,6 @@ MainCycle:
 	movb	CurrentMode, R0
 	asl	R0
 	call	@MainCycleTbl(R0)		; run procedures
-	call	K1Check				; RGB/GRB
 	call	StopCheck			; STOP key - reset game
 	call	K2Check				; K2 key - debug on|off
 	br	MainCycle
@@ -45,10 +44,19 @@ MainCycleTbl:	.word	MainMenuInit, MainMenu, MainInit, MAINC1, MAINC2, MAINC3, MA
 ; menu prepare
 MainMenuInit:
 	; draw screen and text lines
-	call	ClearScreen
+	call	ClearScreen	
 	; scroll to 0
 	clr     SCROLY 
 	call	Scroll
+	; set custom palette
+	mov	#^B1011100110011000, R0
+	mov	#^B1111111111111101, R1
+	mov	#C_CMD_PALUPD, R5
+	call	CmdExe
+	; unpack picture
+	mov	#ZxMig, R0
+	mov	#C_VADDR*2, R1
+	call	Unpack
 	; start some music
 	mov	#1., R0
 	mov	#C_CMD_MUSIC, R5
@@ -58,21 +66,17 @@ MainMenuInit:
 	mov	#C_MENU_X, R1
 	mov	#C_MENU_Y, R2
 	call	FN1PRT
-	mov	#MsgMenu001, R0
-	mov	#C_MENU_X+6., R1
-	mov	#C_MENU_Y+15., R2
-	call	FN1PRT
 	mov	#MsgMenu002, R0
 	mov	#C_MENU_X+6., R1
-	mov	#C_MENU_Y+30., R2
+	mov	#C_MENU_Y+12., R2
 	call	FN1PRT
 	mov	#MsgMenu003, R0
 	mov	#C_MENU_X+4., R1
-	mov	#C_MENU_Y+45., R2
+	mov	#C_MENU_Y+24., R2
 	call	FN1PRT
 	mov	#MsgMenu004, R0
 	mov	#14., R1
-	mov	#220., R2
+	mov	#230., R2
 	call	FN2PRT
 	incb	CurrentMode
 	return
@@ -131,9 +135,14 @@ MAINC1:	call	SCROLL				; set screen scroll ASAP to prevent teardowns (they CAN B
 99$:	return
 
 
-; wait for SHIFT key
-MAINC2:	tst	KeyShi
+; wait for shift/space/up
+MAINC2:	mov	KeyShi, R0
+	add	KeySpc, R0
+	add	KeyUp, R0
 	beq	10$
+	clr	KeyShi
+	clr	KeySpc
+	clr	KeyUp
 	incb	CurrentMode
 10$:	return
 
@@ -252,7 +261,48 @@ DebugInfo:
 	call	SPROW4
 99$:	return
 
-	
+
+Unpack:	clr	R2
+	movb	#200, R3
+	sxt	R5
+10$:	call	50$
+	movb	(R0)+, (R1)+
+	sob	R2, .-2
+	aslb	R3
+	bcs	30$
+	call	50$
+20$:	mov	R1, R4
+	add	R5, R4
+	movb	(R4)+, (R1)+
+	sob	R2, .-2
+	aslb	R3
+	bcc	10$
+30$:	mov	#-2, R2
+	call	60$
+	incb	R2
+	bne	.+4
+40$:	return
+	swab	R2
+	mov	R2, R5
+	clrb	R5
+	bisb	(R0)+, R5
+	asr	R5
+	mov	#1, R2
+	bcs	.+6
+	call	80$
+	inc	R2
+	br	20$
+50$:	incb	R2
+60$:	aslb	R3
+	bne	70$
+	movb	(R0)+, R3
+	rolb	R3
+70$:	bcs	40$
+80$:	aslb	R3
+	rol	R2
+	br	60$
+
+
 ; //////////////////////////////////////////////////////////////////////////////
 ; // COMMON
 ; //////////////////////////////////////////////////////////////////////////////
@@ -3063,11 +3113,17 @@ WCP00:	.WORD	177777, 177777, 177777, 177777, 177777, 177777, 177777, 177777
 
 
 ; menu strings
-MsgMenu000:	.asciz	<1>"CONTROLS"<2>":"<3>" ARROWS, SHIFT"
-MsgMenu001:	.asciz	<1>"K1"<2>":"<3>" RGB/GRB"
-MsgMenu002:	.asciz	<1>"K2"<2>":"<3>" DEBUG MODE"
-MsgMenu003:	.asciz	<1>"STOP"<2>":"<3>" RESET"
-MsgMenu004:	.asciz	<1>"PRESS "<3>"SPACE"
+MsgMenu000:	.asciz	<2>"CONTROLS"<2>":"<3>" ARROWS, SHIFT"
+MsgMenu002:	.asciz	<2>"K2"<2>":"<3>" DEBUG MODE"
+MsgMenu003:	.asciz	<2>"STOP"<2>":"<3>" RESET"
+MsgMenu004:	.asciz	<2>"PRESS "<3>"SPACE"
+
+
+; menu image
+ZxMig:
+@includebin _mig_zx.bin
+	.even
+
 
 ; // ADDRESSes /////////////////////////////////////////////////////////////////
 
