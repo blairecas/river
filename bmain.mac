@@ -5,19 +5,19 @@
 	.asect
 	.=1000
 
-PpuComm = 157600
+PpuComm = 157776
 
 Start:	mtps	#200				; stop right there, you interrupts
 	mov	#1000, SP			; just in case
-	
+
 	; run PPU first
-	mov	#177777, @#PpuComm
+	mov	#177777, PpuComm
 	; start PPU launcher code
 	mov	#PpuLoaderStart, R4
 	mov	#PpuLoaderEnd-PpuLoaderStart/2, R5
 	call	PPRun
-	; check when its ready
-	tst	@#PpuComm
+	; wait for PPU to launch initial stage
+	tst	PpuComm
 	bne	.-4
 
 	; relocate CPU unpacker and code
@@ -247,4 +247,6 @@ PpuData:
 	.even
 PpuDataEnd:
 
+
+ProgramEnd:
 	.end	Start

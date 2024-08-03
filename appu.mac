@@ -3,6 +3,7 @@
 	.ASECT
 	.=0
 
+@include common.mac
 @include ppu_header.mac
 	
 PPMain:	; clean upper PPU RAM (with screen plane 0)
@@ -11,18 +12,6 @@ PPMain:	; clean upper PPU RAM (with screen plane 0)
 	clr	(R0)+
 	sob	R3, .-2
  
-	; ackn of PPU launch
-	mov	#PPUYYY, @#177010
-	clr	@#177014
-
- 	; wait for asking to start phase 3
-	mov	#PPUYYY, @#177010
-	cmp     #30, @#177014
-	bne	.-14
-        
-	; final preparations
-	call	CLEAUP		; cleanup upper RAM
-
 	; timers
 	bic	#^B0000001000000000, @#177054	; disallow vsync in PPU
 	bis	#^B0000000100000000, @#177054	; allow vsync in CPU
@@ -32,11 +21,18 @@ PPMain:	; clean upper PPU RAM (with screen plane 0)
 	; keyboard
 	mov	#KEYBI, @#300
 	
+	; ackn of PPU launch
+	mov	#PpuComm/2, @#177010
+	clr	@#177014
+
+10$:	; wait synchronize from CPU
+	mov	#PpuComm/2, @#177010
+	cmp	#30, @#177014
+	bne	10$
+	mov	#03, @#177014
+
 	mtps	#0
 
-        ; acknowledge start phase 3
-	mov	#PPUYYY, @#177010	
-	mov	#03, @#177014
 
 ; //////////////////////////////////////////////////////////////////////////////
 ; // MAIN PPU CYCLE
@@ -48,16 +44,16 @@ MAINCY:	call	MUSPRO
 	
 CMDPRO:	mov	#CMDBUF, @#177010
 	tst	@#177014
-	bne	1$
+	bne	10$
 	inc	WAIPP0			; 'empty' cycles counter
 	return	
-1$:	mov	#CMDBUF, CMDADR
+10$:	mov	#CMDBUF, CMDADR
 	inc	CMDADR	
 CMDPRC:	; check for overflow
 	cmp	CMDADR, #CMDBUF
 	bhis	.+6
 	jmp	@#ERROR
-	cmp	CMDADR, #PPUYYY
+	cmp	CMDADR, #CmdBufEnd
 	blo	.+6
 	jmp	@#ERROR
 	; command
@@ -65,13 +61,13 @@ CMDPRC:	; check for overflow
 	mov	@#177014, R5
 	inc	CMDADR
 	tst	R5
-	bne	1$
+	bne	10$
 	; end of commands
 	mov	#CMDBUF, CMDADR
 	mov	CMDADR, @#177010
 	mov	#0, @#177014
 	return
-1$:	; get command procedure 
+10$:	; get command procedure 
 	asl	R5
 	mov	CMDPAD(R5), R5
 	; get parameters (R0..R4) and run
@@ -95,11 +91,11 @@ CMDPRC:	; check for overflow
 
 ; commands table
 CMDPAD:	.WORD	000000	; 00
-	.WORD	CLEAUP	; 01 cleanup upper RAM
+	.WORD	RETADR	; 01 - nothing
 	.WORD	CLRSC0	; 02 clear plane 0
 	.WORD	PALUPD	; 03 set palette, cursor, resolution, luminance (R0,R1 - palette, R2,R3 - cursor, resolution, lumi)
 	.WORD	SCROLL	; 04 set first disp line of lines table (R0 - num)
-	.WORD	IFPREP	; 05 draw upper interface part 
+	.WORD	RETADR	; 05 - nothing
 	.WORD	DRAPLA	; 06 draw plane
 	.WORD	DRAMIS	; 07 draw missile
 	.WORD	CLEMIS	; 08 clear missile
@@ -121,16 +117,12 @@ PPTINI:	clr	@#177710
 	bne	PPTINI
 	return
 
-; 01: clean upper RAM
-CLEAUP:	mov	#END, R0
-	mov	#100000-END/2, R2
-	clr	(R0)+
-	sob	R2, .-2
-	return
+; 01: return
+RETADR:	return
 
 ; 02: clear plane 0
-CLRSC0:	mov	#VADDR, R0
-	mov	#13200, R5	; 26400(8) bytes
+CLRSC0:	mov	#C_VADDR, R0
+	mov	#288.*20., R5
 	clr	(R0)+
 	sob	R5, .-2
 	return
@@ -138,44 +130,57 @@ CLRSC0:	mov	#VADDR, R0
 ; 03: pallete, resolution, cursor, luminance change
 PALUPD:	mov	R0, VLinesBegin
 	mov	R1, VLinesBegin+2
-	mov	R2, VLinesBegin+10
-	mov	R3, VLinesBegin+12
 	return
 
+SVprevSaddr:	.word	0
+;SVprevSdata:	.word	0
+
 ; 04: set offset in lines table (to scroll display) R0 = 0..223
-SCROLL:	mov	#WAIPPU, @#177010	; fix empty cycles for debug 
-	mov	WAIPP0, @#177014	;
+SCROLL:	mov	#WAIPPU, @#177010		; fix empty cycles for debug 
+	mov	WAIPP0, @#177014		;
 	clr	WAIPP0
-	;
+	; restore previous if needed
+	mov	SVprevSaddr, R1
+	beq	10$
+;	mov	SVprevSdata, -2(R1)
+	mov	SVprevSaddr, -2(R1)
+10$:	; set new values
+	mov	#C_FIELD_Y*4+VLinesTable, R1
+	mov	#C_FIELD_BOTTOM*4+VLinesTable, R2
 	mov	R0, SCROLY
+	bne	20$
+	; line zero - special case
+	clr	SVprevSaddr			; will not save for line 0
+	mov	R1, -2(R1)
+	mov	R2, -2(R2)
+	br	30$
+20$:	; non-zero line
 	asl	R0
 	asl	R0
-	add	#VLinesBegin+520, R0
-	mov	R0, VLinesBegin+516
-	; clear first line of plane 0
-	mov	(R0), R0	; vaddr from line table
-	mov	#20., R3	; 20 words, 40 bytes
-	clr	(R0)+		; plane 0 is mapped to RAM
-	sob	R3, .-2
+	add	R1, R0
+	mov	R0, SVprevSaddr			; save previous addr and data
+;	mov	-2(R0), SVPrevSdata
+	mov	R2, -2(R0)			; set new
+	mov	R0, -2(R1)
+	mov	R1, -2(R2)
+30$:	; clear first line of plane 0
+	mov	(R0), R0			; vaddr from line table
+	mov	#10., R3			; 20 words, 40 bytes
+	clr	(R0)+				; plane 0 is mapped to RAM
+	clr	(R0)+
+	clr	(R0)+
+	clr	(R0)+
+	sob	R3, .-10
 	return
+
 
 ; // GAME DRAWINGS /////////////////////////////////////////////////////////////
 
-; 05: draw upper interface part
-IFPREP:	; 2lines
-;	mov	#VADDR, R5
-;	add	#<62.*40.>, R5
-;	mov	#177777, R0
-;	mov	#40., R3
-;	mov	R0, (R5)+
-;	sob	R3, .-2	
-	return
-
 ; 06: draw plane
 ; R0-dir (0-normal, 1-right, 2-left, 3-expl1, 4-expl2, 5-clear), R1-X, R2-Y
-DRAPLA:	mov	#288., R3
+DRAPLA:	mov	#C_FIELD_BOTTOM, R3
 	sub	R2, R3			; R3 - lines to cross vaddr boundary
-	mov	#VADDR, R5
+	mov	#C_VADDR, R5
 	mov	R2, R4			; R2*40 = R2*32 + R2*8
 	ash	#3, R4
 	add	R4, R5
@@ -248,20 +253,20 @@ DRAMIS:	mov	DRAM03, DRAM13		; rotate previous vaddr and boundary
 	; make y-coord
 	mov	SCROLY, R5
 	sub	R2, R5
-	add	#64., R5
-5$:	cmp	R5, #64.
+	add	#C_FIELD_Y, R5
+5$:	cmp	R5, #C_FIELD_Y
 	bge	10$
 	add	#224., R5
-	br	5$
-10$:	cmp	R5, #288.
+	br	12$
+10$:	cmp	R5, #C_FIELD_BOTTOM
 	blt	12$
-	sub	#288., R5
-	br	10$
+	sub	#C_FIELD_BOTTOM, R5
+;	br	10$
 12$:	; R5 = Y-coord
 	mov	R5, R2
-	mov	#288., R3
+	mov	#C_FIELD_BOTTOM, R3
 	sub	R2, R3			; R3 - lines to cross vaddr boundary
-	mov	#VADDR, R5
+	mov	#C_VADDR, R5
 	mov	R2, R4			; R2*40 = R2*32 + R2*8
 	ash	#3, R4
 	add	R4, R5
@@ -314,7 +319,7 @@ CLEMIS:	mov	DRAM13, R3
 
 ; 09: draw fuel
 ; R1-X, R2-Y
-DRAFUE:	mov	#VADDR, R5
+DRAFUE:	mov	#C_VADDR, R5
 	mov	R2, R4			; R2*40 = R2*32 + R2*8
 	ash	#3, R4
 	add	R4, R5
@@ -576,7 +581,7 @@ ERROR:	mtps	#600		; halt mode
 	mov	R0, -(SP)
 	mov	R5, -(SP)
 	mov	R3, -(SP)
-	mov	#VADDR, R5
+	mov	#C_VADDR, R5
 	mov	#SPRERR, R0
 	mov	#7., R3
 10$:	movb	(R0)+, (R5)+
@@ -1187,34 +1192,31 @@ END:
 
 ; // ADDRESSes /////////////////////////////////////////////////////////////////
 
-VADDR =40000	; vaddr (=100000CPU, =40000PPU)
-LINEAD=2120	; lines array
-
 ; its ADDR/2 for CPU-PPU exchange
-CMDBUF=67000	; ~450 bytes, 224 words command buffer
-PPUYYY=67700	; PPU state
+CMDBUF		= 67000		; ~450 bytes, 224 words command buffer
+CmdBufEnd	= 67700
 
-KEYK2 =67752	; key K2
-KEYSHI=67753	; key SHIFT
-WAIPPU=67754	; PPU wait cycles
-KEY4  =67755
-KEYCOM=67756	; combo keys seq was pressed
-RTICN2=67757
-KEY3  =67760
-KEYK1 =67761
-KEYSTP=67762
-KEYUST=67763
-KEY2  =67764
-KEY1  =67765
-KEYENT=67766
-KEYSPC=67767
-KEYRHT=67770
-KEYLFT=67771
-KEYDWN=67772
-KEYUP =67773
-KEYCUR=67774	; current key
-VSY2CN=67775	; vsync 2 counter
-VSY1CN=67776	; vsync 1 counter
+KEYK2		= 67752		; key K2
+KEYSHI		= 67753		; key SHIFT
+WAIPPU		= 67754		; PPU wait cycles
+KEY4		= 67755
+KEYCOM		= 67756		; combo keys seq was pressed
+RTICN2		= 67757
+KEY3		= 67760
+KEYK1		= 67761
+KEYSTP		= 67762
+KEYUST		= 67763
+KEY2		= 67764
+KEY1		= 67765
+KEYENT		= 67766
+KEYSPC		= 67767
+KEYRHT		= 67770
+KEYLFT		= 67771
+KEYDWN		= 67772
+KEYUP		= 67773
+KEYCUR		= 67774		; current key
+VSY2CN		= 67775		; vsync 2 counter
+VSY1CN		= 67776		; vsync 1 counter
 
 	.even
 PpuEnd:

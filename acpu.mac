@@ -6,99 +6,135 @@
 @include common.mac
 @include cpu_header.mac
 
-Start:	; clean upper CPU RAM
+Start:	; clean upper CPU RAM (also clear planes 1,2)
 	mov	#CpuEnd, R0
 	mov	#157776-CpuEnd/2, R3
 	clr	(R0)+
 	sob	R3, .-2
 
-	; ask for 'ppu phase 3'
-	clr	CMDBUF
-	mov	#30, PPUYYY
-        ; wait for ackn of phase 3
-        cmp     #3, PPUYYY
-        bne     .-6
+	; set int
+	mov	#VsyncInt, @#100
 
-	mov	#VSYNI, @#100	; vsync interrupt
+	; synchronize CPU/PPU
+	mov	#30, PpuComm
+	cmp	#03, PpuComm
+	bne	.-6
+
 	mtps	#0
 
-	; all set - start main code
-	clr	CURMOD
 
 ; //////////////////////////////////////////////////////////////////////////////
 ; // MAIN
 ; //////////////////////////////////////////////////////////////////////////////
 
-MAINCY:	call	WAITCY			; vsync wait cycle
-	call	DBGINF			; debug info
-	; key UST - pause
-	tst	KEYUST
-	beq	10$
-	clr	KEYUST
-	com	PAUSE
-10$:	tst	PAUSE
-	bne	MAINCY
-	; run procedures
-	mov	CURMOD, R0
+; main game cycle
+MainCycle:
+	call	VSyncWait			; vsync wait cycle
+	call	DebugInfo			; debug info
+	movb	CurrentMode, R0
 	asl	R0
-	call	@MAINCT(R0)
-	; at the very last - process setup keys
-	call	RGBCHK			; RGB/GRB
-	call	STPCHK			; STOP key - reset game
-	call	KK2CHK			; K2 key - debug on|off
-	jmp	MAINCY
+	call	@MainCycleTbl(R0)		; run procedures
+	call	K1Check				; RGB/GRB
+	call	StopCheck			; STOP key - reset game
+	call	K2Check				; K2 key - debug on|off
+	br	MainCycle
 
-MAINCT:	.WORD	MAINC0, MAINC1, MAINC2, MAINC3, MAINC4, MAINC5, MAINC6
+MainCycleTbl:	.word	MainMenuInit, MainMenu, MainInit, MAINC1, MAINC2, MAINC3, MAINC4, MAINC5, MAINC6
+
+
+; menu prepare
+MainMenuInit:
+	; draw screen and text lines
+	call	ClearScreen
+	; scroll to 0
+	clr     SCROLY 
+	call	Scroll
+	; start some music
+	mov	#1., R0
+	mov	#C_CMD_MUSIC, R5
+	call	CmdExe
+	; print menu
+	mov	#MsgMenu000, R0
+	mov	#C_MENU_X, R1
+	mov	#C_MENU_Y, R2
+	call	FN1PRT
+	mov	#MsgMenu001, R0
+	mov	#C_MENU_X+6., R1
+	mov	#C_MENU_Y+15., R2
+	call	FN1PRT
+	mov	#MsgMenu002, R0
+	mov	#C_MENU_X+6., R1
+	mov	#C_MENU_Y+30., R2
+	call	FN1PRT
+	mov	#MsgMenu003, R0
+	mov	#C_MENU_X+4., R1
+	mov	#C_MENU_Y+45., R2
+	call	FN1PRT
+	mov	#MsgMenu004, R0
+	mov	#14., R1
+	mov	#220., R2
+	call	FN2PRT
+	incb	CurrentMode
+	return
+
+
+; menu (wait key)
+MainMenu:
+	mov	KeySpc, R0
+	add	KeyShi, R0
+	beq	99$
+	clr	KeySpc
+	clr	KeyShi
+	incb	CurrentMode
+99$:	return
 
 
 ; first stage - init
-MAINC0:	; game vars from reset
-	cmp	SCORE, HSCORE		; update hiscore?
+MainInit:	
+	cmp	Score, HScore			; update hiscore?
 	ble	10$
-	mov	SCORE, HSCORE
-10$:	clr	SCORE			; clear current score
-	mov	#9., LIVES		; default lives = 3
-	mov	#1., LEVEL		; level
-	mov	#1., SLEVEL		; stored level
+	mov	Score, Hscore
+10$:	clr	Score
+	mov	#9., Lives
+	mov	#1., Level
+	mov	#1., SLevel			; stored level (will continue from it after crash)
 	; reset random, 0x14, 0xA8
-        movb	#24, RANDLO
-	movb	#250, RANDHI
-	mov	RANDLO, RANSLO		; duplicate them -> 1
-	mov	RANDLO, RANS0L		; duplicate them -> 2
+        movb	#24, RandLo
+	movb	#250, RandHi
+	mov	RandLo, RansLo			; duplicate them -> 1
+	mov	RandLo, Rans0L			; duplicate them -> 2
 	;
-	call	PREVAR			; game vars from live lost
-	call	PRESCR			; prepare screen
-	; start some music
-	mov	#1., R0			; music ID
-	mov	#C_CMD_MUSIC, R5	; start music command
-	call	CMDEXE
+	call	PrepareVars			; game vars from live lost
+	call	ClearScreen
+	call	PaletteUpdate
+	call	PrepareScreen
 	; go second stage
-	mov	#1., CURMOD
+	incb	CurrentMode
 	return
 
 
 ; second stage - scroll field into view 
-MAINC1:	call	SCROLL			; set screen scroll ASAP to prevent teardowns (they CAN BE visible on real UKNC)
-	call	DRAWLB			; draw line
-	call	DRAWOB			; draw block objects
-	call	ROTATE			; one line of rotation
-        tst     SCROLY          	; are we at start?
+MAINC1:	call	SCROLL				; set screen scroll ASAP to prevent teardowns (they CAN BE visible on real UKNC)
+	call	DRAWLB				; draw line
+	call	DRAWOB				; draw block objects
+	call	ROTATE				; one line of rotation
+        tst     SCROLY          		; are we at start?
         bne     99$
-	call	CMDWAI			; PPU commands start waiting
+	call	CMDWAI				; PPU commands start waiting
 	call	DRAPLA
 	call	DRAFUE
-	call	CMDFIN			; PPU commands finish
-	call	DRASCO			; draw 00000 score
-	call	DRAHSC			; draw hiscore
-	call	DRALIV			; draw lives
-	mov     #2., CURMOD
+	call	CMDFIN				; PPU commands finish
+	call	DrawScore			; draw 00000 score
+	call	DrawHScore			; draw hiscore
+	call	DrawLives
+	incb	CurrentMode
 99$:	return
 
 
 ; wait for SHIFT key
-MAINC2:	tst	KEYSHI
+MAINC2:	tst	KeyShi
 	beq	10$
-	mov	#3., CURMOD
+	incb	CurrentMode
 10$:	return
 
 
@@ -110,13 +146,13 @@ MAINC3:	clr	SecondFrame
 	inc	SecondFrame
 	call	DrawScrollProc
 10$:	; gameplay
-	call	PROCOB			; process objects moving etc.
-	call	PROFUE			; process fuel decrease
-	call	CHKPLA			; check plane collision vs land
-	call	PROMIS			; process missile
-	call	PROMI2			; missile vs objects
-	call	PROPL2			; plane vs objects
-	call	PlaneKeys		; process plane keys
+	call	PROCOB				; process objects moving etc.
+	call	PROFUE				; process fuel decrease
+	call	CHKPLA				; check plane collision vs land
+	call	PROMIS				; process missile
+	call	PROMI2				; missile vs objects
+	call	PROPL2				; plane vs objects
+	call	PlaneKeys			; process plane keys
 	clr	DoubleSpeed
 	tst	KeyUp
 	beq	20$
@@ -124,22 +160,24 @@ MAINC3:	clr	SecondFrame
 20$:	return
 
 DrawScrollProc:
-	call	SCROLL			; it also contains CMDWAI
-	call	DRAWLB			; draw line first asap
+	call	SCROLL				; it also contains CMDWAI
+	call	DRAWLB				; draw line first asap
 	; drawing & stuff in PPU
-	call	CMDWAI			; PPU commands start waiting
-	call	DRAPLA			; draw plane
+	call	CMDWAI				; PPU commands start waiting
+	call	DRAPLA				; draw plane
 	tst	SecondFrame
 	bne	10$
-	call	DRAMIS			; draw missile
-10$:	call	DRAENP			; draw enemy planes
-	call	DRAFUE			; draw fuel gauge line
-	call	CMDFIN			; PPU commands finish
+	call	DRAMIS				; draw missile
+	call	DRAENP				; draw enemy planes
+10$:	call	DRAFUE				; draw fuel gauge line
+	call	CMDFIN				; PPU commands finish
 	; drawing in CPU
-	call	DRAWOB			; draw block objects
-	call	DRASCO			; draw score if needed
-	; rotate
-	call	ROTATE			; one line of rotation
+	tst	SecondFrame
+	bne	20$
+	call	DRAWOB				; draw block objects
+	call	DrawScore			; (maybe) draw score
+20$:	; rotate
+	call	ROTATE				; one line of rotation
 	return
 
 
@@ -147,71 +185,72 @@ DrawScrollProc:
 MAINC4:	inc	PlaneStatus
 	cmp	PlaneStatus, #128.
 	blo	99$
-	mov	#5., CURMOD
+	incb	CurrentMode
 99$:	return
-	
+
+
 ; live lost - init last bridge variables or game over
-MAINC5:	dec	LIVES
+MAINC5:	dec	Lives
 	ble	90$	
-        mov	RANSLO, RANS0L		; restore random (both)
+        mov	RANSLO, RANS0L			; restore random (both)
         mov	RANSLO, RANDLO	
-	mov	SLEVEL, LEVEL		; restore level
-	call	PREVAR			; game vars from live lost
-	call	PRESCR			; prepare screen
-	mov	#1., CURMOD		; second stage again
+	mov	SLEVEL, LEVEL			; restore level
+	call	PrepareVars			; game vars from live lost
+	call	ClearScreen
+	call	PrepareScreen			; prepare screen
+	movb	#C_MODE_PREPARE, CurrentMode	; second stage again
 	return
-90$:	call	DRALIV			; draw 0 lives
-	; TODO: draw game over
-	mov	#6., CURMOD
+90$:	call	DrawLives			; draw 0 lives
+	movb	#C_MODE_OVER, CurrentMode
 	return
-        
-; game over wait for keypress and go to reset
-MAINC6:	tst	KEYSHI
-	beq	10$
-	clr	KEYSHI
-	clr	CURMOD
-	return
-10$:	tst	KEYSPC
-	beq	20$
-	clr	KEYSPC
-	clr	CURMOD
-20$:	return
+
+
+; game over wait for keypress and go to 1st level
+MAINC6:	mov	KeyShi, R0
+	add	KeySpc, R0
+	beq	99$
+	clr	KeyShi
+	clr	KeySpc
+	movb	#C_MODE_INIT, CurrentMode
+99$:	return
 	
 
 ; //////////////////////////////////////////////////////////////////////////////
 ; // UTILS, DEBUG, ETC
 ; //////////////////////////////////////////////////////////////////////////////
 
-; wait cycle
-WAITCY:	inc	WAICL0
+; wait for vsync
+VsyncWait:
+	inc	WAICL0
 	tst	VSY1CN
-	beq	WAITCY
+	beq	VsyncWait
 	clr	VSY1CN
 	inc	FRAMCN
 	mov	WAICL0, WAICLC
 	clr	WAICL0
 	return
 
+
 ; debug info
-DBGINF:	tst	DBGMOD
-	bne	1$
-	return
-1$:	bit	#^B1111, FRAMCN		; once in 16 frames
+DebugInfo:
+	tstb	DebugMode
+	beq	99$
+	bit	#^B1111, FRAMCN			; once in 16 frames
 	beq	2$
 	return
-2$:	mov	KEYCUR, R0		; pressed/released key
+2$:	mov	KEYCUR, R0			; pressed/released key
 	mov	#1., R1
 	mov	#4., R2
 	call	SPRBW4
-	mov	WAICLC, R0		; remaining wait cycles 
+	mov	WAICLC, R0			; remaining wait cycles 
 	mov	#16., R1
 	mov	#4., R2
 	call	SPROW4
-	mov	WAIPPU, R0		; remaining PPU wait cycles 
+	mov	WAIPPU, R0			; remaining PPU wait cycles 
 	mov	#21., R1
 	mov	#4., R2
 	call	SPROW4
-	return
+99$:	return
 
 	
 ; //////////////////////////////////////////////////////////////////////////////
@@ -250,27 +289,28 @@ CMDEXE:	call	CMDWAI
 	call	CMDFIN
 	return
 
+
 ; //////////////////////////////////////////////////////////////////////////////
 ; // GAEMPLAY
 ; //////////////////////////////////////////////////////////////////////////////
 
 ; prepare screen
-PRESCR:	call	CLRSCR			; clear screen
+PrepareScreen:
         call    CLRBLK          	; clear all objects
-	mov	#C_CMD_IFPREP, R5	; prepare interface (draw it)
-	call	CMDEXE
 	mov	#WCP00, R0		; draw fuel gauge
 	mov	#14., R1
-	mov	#36., R2
+	mov	#36.-64.+C_FIELD_Y, R2
 	call	SPRITW
 	return
 
-; game vars from live lost 
-PREVAR:	mov     #223., SCROLY   	; scroll offset = last line
-	mov	#31., BLOCKY		; block line = last line
-	mov	#1., NEEDLN		; need to draw first line
-	clr	BLOCNT			; block counter = 0 (bridge)
-	mov	#20., NOFUEL		; blocks cnt to 100% make fuel
+
+; game vars from live lost / new game
+PrepareVars:
+	mov     #223., SCROLY   		; scroll offset = last line
+	mov	#31., BLOCKY			; block line = last line
+	mov	#1., NEEDLN			; need to draw first line
+	clr	BLOCNT				; block counter = 0 (bridge)
+	mov	#20., NOFUEL			; blocks cnt to 100% make fuel
 	; reset start/end river bank sizes
 	mov	#15., BLNXT1
 	mov	#15., BLSTA1
@@ -285,45 +325,51 @@ PREVAR:	mov     #223., SCROLY   	; scroll offset = last line
 	clr	MISSLX
 	clr	MISSLY
 	mov	#<76.*16.>, FUEL
-	mov	#1., SCORED		; will draw score
+	mov	#1., SCORED			; will draw score
 	return
 
+
 ; key K1 - RGB / GRB switch
-RGBCHK:	tst	KEYK1
-	bne	10$
-	return
-10$:	clr	KEYK1
-	com	SETRGB	
+K1Check:
+	tst	KeyK1
+	beq	99$
+	clr	KeyK1
+	comb	RgbMode
+	call	PaletteUpdate
+99$:	return
+
+
+PaletteUpdate:
+	tstb	RgbMode
 	bne	20$
 	mov	#^B1111101011111000, R0
 	mov	#^B1111111011111001, R1
-	mov	#^B0000000000010000, R2
-	mov	#^B0000000000010111, R3
 	br	30$
 20$:	mov	#^B1111110011111000, R0
 	mov	#^B1111111011111001, R1
-	mov	#^B0000000000010000, R2
-	mov	#^B0000000000010111, R3
-30$:	mov	#C_CMD_PALUPD, R5	; 03. - update palette & resolution
-	call	CMDEXE
+30$:	mov	#C_CMD_PALUPD, R5
+	call	CmdExe
 	return
+
 
 ; key STOP - restart all
-STPCHK:	tst	KEYSTP
-	bne	10$
-	return
-10$:	clr	KEYSTP
-	clr	CURMOD
-	return
+StopCheck:
+	tst	KEYSTP
+	beq	99$
+	clr	KEYSTP
+	clrb	CurrentMode
+99$:	return
+
 
 ; key K2 - debug on|off (and restart)
-KK2CHK:	tst	KEYK2
-	bne	10$
-	return
-10$:	clr	KEYK2
-	com	DBGMOD
-	clr	CURMOD
-	return
+K2Check:
+	tst	KeyK2
+	beq	99$
+	clr	KeyK2
+	comb	DebugMode
+	clrb	CurrentMode
+99$:	return
+
 
 ; scroll screen 223..0
 SCROLL: mov     SCROLY, R0
@@ -332,8 +378,9 @@ SCROLL: mov     SCROLY, R0
         return
 
 ; rotate one line
-ROTATE:	tst	PlaneStatus		; do not slow rotation if plane is crashing
-	bne	8$
+ROTATE:
+;	tst	PlaneStatus		; do not slow rotation if plane is crashing
+;	bne	8$
 	tst	KEYDWN			; need to slow rotation?
 	beq	8$
 	bit	#1, FRAMCN
@@ -760,7 +807,7 @@ HOUSLN: mov	BLOCKY, R1
 	return
 20$:	sub	#06., R1		; R1 = line inside house
 	mov	SCROLY, R2
-	add	#64., R2
+	add	#C_FIELD_Y, R2
 	asl	R2
 	mov	LINEAD(R2), R5		; R5 = vaddr
 	mov	@#<BLOCKS+2>, R0	; R5 = vaddr + house X
@@ -789,7 +836,7 @@ FUELIN:	mov	BLOCKY, R1
 	return
 20$:	sub	#04., R1		; sprite line -> R1
 	mov	SCROLY, R2	
-	add	#64., R2
+	add	#C_FIELD_Y, R2
 	asl	R2
 	mov	LINEAD(R2), R5		; vaddr -> R5
 	mov	@#<BLOCKS+2>, R0	; X/8 coord
@@ -812,7 +859,7 @@ DRAWLB:	tst	NEEDLN			; check if we need to draw anything
 	call    MAKEBL          	; try to make a new block
 	; R5 - to line vaddr
 	mov	SCROLY, R5
-	add	#64., R5
+	add	#C_FIELD_Y, R5
 	asl	R5
 	mov	LINEAD(R5), R5
 	; draw normal banks and river
@@ -888,7 +935,7 @@ DRAWO5:	mov	DRA000, R0		; block addr
 	beq	1$
 	mov	WSP51L(R5), R4		; use another sprites for direction
 1$:	mov	R2, R5
-	add	#64., R5
+	add	#C_FIELD_Y, R5
 	asl	R5
 	mov	LINEAD(R5), R5		; vaddr -> R5
 	asr	R1
@@ -962,7 +1009,7 @@ DRAWO6:	mov	DRA000, R0		; block addr
 	mov	(R4), R4		; sprite adr with preshift -> R4
 	; gat vaddr
 	mov	R2, R5
-	add	#64., R5
+	add	#C_FIELD_Y, R5
 	asl	R5
 	mov	LINEAD(R5), R5	; vaddr -> R5
 	asr	R1
@@ -1039,7 +1086,7 @@ DEXPO4:	mov	DRA000, R0		; block addr
 	mov	#WCPBLU, R4
 1$:	; get vaddr
 	mov	R2, R5
-	add	#65., R5		; (!!!) YES, NOT 64. (!!!) correction is needed by 1 line exclusively for fuel
+	add	#C_FIELD_Y+1, R5	; (!!!) YES, NOT 64. (!!!) correction is needed by 1 line exclusively for fuel
 	asl	R5
 	mov	LINEAD(R5), R5
 	asl	R1			; X * 2 (fuel X already X*8)
@@ -1108,7 +1155,7 @@ DEXPO5:	mov	DRA000, R0		; block addr
 	mov	(R4), R4		; sprite adr with preshift -> R4
 	; get vaddr
 5$:	mov	R2, R5
-	add	#64., R5
+	add	#C_FIELD_Y, R5
 	asl	R5
 	mov	LINEAD(R5), R5		; vaddr -> R5
 	asr	R1
@@ -1188,7 +1235,7 @@ DEXPO6:	mov	DRA000, R0		; block addr
 	mov	(R4), R4		; sprite adr with preshift -> R4
 	; get vaddr
 5$:	mov	R2, R5
-	add	#64., R5
+	add	#C_FIELD_Y, R5
 	asl	R5
 	mov	LINEAD(R5), R5		; vaddr -> R5
 	asr	R1
@@ -1335,7 +1382,7 @@ PROCO5:	; are we moving already?
 ; TODO: need to store object y-line vaddr instead to not always compute it
 CHKGRE:	movb	4(R0), R2
 	bic	#^B1111111100000000, R2	; Y line
-	add	#64., R2
+	add	#C_FIELD_Y, R2
 	asl	R2
 	mov	LINEAD(R2), R2		; vaddr -> R2
 	mov	2(R0), R1		; X coord
@@ -1437,7 +1484,7 @@ DRAPLA:	; save bounding box
 	bge	2$
 	add	#224., R2
 2$:	mov	R2, PlaneY
-	add	#64., R2
+	add	#C_FIELD_Y, R2
 	mov	PlaneDir, R0
 	; if we are exploding already
 	tst	PlaneStatus
@@ -1515,7 +1562,7 @@ DRAEP0:	mov	DRA000, R0		; block addr
 	cmp	R3, #6.			; plane is 6 lines in height
 	ble	20$
 	mov	#6., R3
-20$:	add	#64., R2
+20$:	add	#C_FIELD_Y, R2
 	asl	R2
 	mov	LINEAD(R2), R2		; vaddr -> R2
 	clc
@@ -1546,7 +1593,7 @@ DRAEX0:	mov	DRA000, R0		; block addr
 	cmp	R3, #6.			; explosion is 6 lines in height
 	ble	20$
 	mov	#6., R3
-20$:	add	#64., R2
+20$:	add	#C_FIELD_Y, R2
 	asl	R2
 	mov	LINEAD(R2), R2		; vaddr -> R2
 	clc
@@ -1581,17 +1628,17 @@ DRAEX0:	mov	DRA000, R0		; block addr
 ; get missile vaddr and lines to vaddr break
 MISCOR:	mov	SCROLY, R5
 	sub	MISSLY, R5
-	add	#64., R5
-5$:	cmp	R5, #64.
+	add	#C_FIELD_Y, R5
+5$:	cmp	R5, #C_FIELD_Y
 	bge	10$
 	add	#224., R5
-	br	5$
-10$:	cmp	R5, #288.
+	br	12$
+10$:	cmp	R5, #C_FIELD_BOTTOM
 	blt	12$
-	sub	#288., R5
-	br	10$
+	sub	#C_FIELD_BOTTOM, R5
+;	br	10$
 12$:	; R5 = Y-coord
-	mov	#288., R3
+	mov	#C_FIELD_BOTTOM, R3
 	sub	R5, R3			; R3 - lines to cross vaddr boundary
 	asl	R5
 	mov	LINEAD(R5), R5
@@ -1632,10 +1679,10 @@ PROMIS:	tst	MISSLX
 10$:	cmp	MISSLX, #1.		; is it about to destruct?
 	beq	20$
 	add	#6., MISSLY
-	tst	DoubleSpeed
-	beq	12$
-	inc	MisslY
-12$:	cmp	MISSLY, #228.
+	;tst	DoubleSpeed
+	;beq	12$
+	;inc	MisslY
+12$:	cmp	MISSLY, #224.
 	bge	30$
 	; check if missile hits river banks
 	call	MISCOR			; R5 <- vaddr, R3 <- lines to vaddr break
@@ -1687,7 +1734,7 @@ PROMI2:	cmp	MISSLX, #1.		; do not process empty or about to destruct
 	movb	R1, 1(R0)		; dir = explosion type (ex-object type)
 	clrb	6(R0)			; animation counter
 	; add score (if not debug)
-	tst	DBGMOD
+	tstb	DebugMode
 	bne	88$
 	asl	R1
 	add	SCOTBL(R1), SCORE
@@ -1716,43 +1763,42 @@ PROMI3:	cmp	R0, R2
 
 ; process plane 2 - check if it hits objects
 ; 
-PROPL2:	tst	PlaneStatus		; do not check already exploding plane
+PROPL2:	tst	PlaneStatus			; do not check already exploding plane
 	beq	10$
-	inc	PlaneStatus		; increase animation and waiting count
+	inc	PlaneStatus			; increase animation and waiting count
 	cmp	PlaneStatus, #32.
-	bge	8$
-	return
-8$:	mov	#4., CURMOD		; next game mode
-	return
+	blo	2$
+	movb	#C_MODE_CRASH, CurrentMode
+2$:	return
 10$:	; analyze blocks 6,7 (last ones)
 	mov	#BLOCK6, PRO000
 	mov	#2., PRO003
-20$:	cmpb	@PRO000, #4.		; don't need to process lower than fuel
+20$:	cmpb	@PRO000, #4.			; don't need to process lower than fuel
 	blo	90$
-	call	OBJCOO			; get obj coords R1,R2,R3,R4 = X1,Y1,X2,Y2
-	cmp	PLANX2, R1		; check X1,X2 in range
+	call	OBJCOO				; get obj coords R1,R2,R3,R4 = X1,Y1,X2,Y2
+	cmp	PLANX2, R1			; check X1,X2 in range
 	blt	90$
 	cmp	PLANX1, R3
 	bgt	90$
 	; cycle 4 times by +3 pixels for Y line
 	mov	PlaneY, TEMPR0
-	mov	#4., TEMPR3		; not really correct because plane is 14px in height, but ok
+	mov	#4., TEMPR3			; not really correct because plane is 14px in height, but ok
 30$:	mov	TEMPR0, R0
-	call	PROMI3			; check R0 in [R2..R4] range
+	call	PROMI3				; check R0 in [R2..R4] range
 	bcs	80$
 	add	#3., TEMPR0
-	cmp	TEMPR0, #224.		; check for lines boundary
+	cmp	TEMPR0, #224.			; check for lines boundary
 	blt	40$
 	sub	#224., TEMPR0
 40$:	dec	TEMPR3
 	bne	30$
 	br	90$	
 80$:	; got our object
-	cmpb	@PRO000, #4.		; is it a fuel?
+	cmpb	@PRO000, #4.			; is it a fuel?
 	bne	84$
-	inc	FUELD			; set flag to draw fuel line
+	inc	FUELD				; set flag to draw fuel line
 	add	#16., FUEL
-	cmp	FUEL, #<76.*16.>	; is it enough fuel?
+	cmp	FUEL, #<76.*16.>		; is it enough fuel?
 	bgt	82$
 	; sound - fuel
 	bit	#^B111, FRAMCN
@@ -1762,7 +1808,7 @@ PROPL2:	tst	PlaneStatus		; do not check already exploding plane
 	mov	#C_CMD_SOUND, R5
 	call	CMDEXE
 	return
-82$:	mov	#<76.*16.>, FUEL	; overfueled
+82$:	mov	#<76.*16.>, FUEL		; overfueled
 	; sound - fuel is full
 	bit	#^B111, FRAMCN
 	beq	83$
@@ -1773,22 +1819,22 @@ PROPL2:	tst	PlaneStatus		; do not check already exploding plane
 	return
 84$:	; explode object
 	mov	PRO000, R0
-	movb	0(R0), R1		; save object ID -> R1
-	movb	#1, 0(R0)		; 1.- explosion
-	movb	R1, 1(R0)		; dir = explosion type (ex-object ID)
-	clrb	6(R0)			; animation counter
+	movb	0(R0), R1			; save object ID -> R1
+	movb	#1, 0(R0)			; 1.- explosion
+	movb	R1, 1(R0)			; dir = explosion type (ex-object ID)
+	clrb	6(R0)				; animation counter
 	; add score and explode plane (if not debug)
-	tst	DBGMOD
+	tstb	DebugMode
 	bne	88$
 	asl	R1
 	add	SCOTBL(R1), SCORE
-	inc	SCORED			; set 'draw score' flag
-	mov	#1, PlaneStatus		; =1 set plane to 'crashing'
+	inc	SCORED				; set 'draw score' flag
+	mov	#1, PlaneStatus			; =1 set plane to 'crashing'
 88$:	; boom sound
-	mov	#2., R0			; sound ID - boom
-	mov	#C_CMD_SOUND, R5	; start sound command
+	mov	#2., R0				; sound ID - boom
+	mov	#C_CMD_SOUND, R5		; start sound command
 	call	CMDEXE
-	mov	#32., BOOMCN		; counter to prevent create missile sound (boom have more priority)
+	mov	#32., BOOMCN			; counter to prevent create missile sound (boom have more priority)
 	return
 	;
 90$:	add	#8., PRO000
@@ -1801,17 +1847,17 @@ PROPL2:	tst	PlaneStatus		; do not check already exploding plane
 ; btw, wtf? is it a plane or a boat? how it can crash onto ground, ships and helicopters?
 ; R1-X
 CHKPLL:	mov	PLANEY, R2	
-	add	#64., R2		; Y-line to display line
+	add	#C_FIELD_Y, R2			; Y-line to display line
 	asl	R2
 	mov	LINEAD(R2), R5
 	asr	R1
 	asr	R1
 	asr	R1
 	asl	R1
-	add	R1, R5			; R5 - vaddr
+	add	R1, R5				; R5 - vaddr
 	mov	#224., R3
-	sub	PLANEY, R3		; R3 - lines to vaddr boundary
-	mov	#12., R2		; R2 - 12 lines - plane height	
+	sub	PLANEY, R3			; R3 - lines to vaddr boundary
+	mov	#12., R2			; R2 - 12 lines - plane height	
 20$:	cmp	#^B0000000011111111, (R5)
 	bne	24$
 	; got green only
@@ -1825,31 +1871,31 @@ CHKPLL:	mov	PLANEY, R2
 	sob	R2, 20$
 	clc
 	return
-30$:	sub	#42660, R5		; (288-64)*80 - 80
+30$:	sub	#42660, R5			; (288-64)*80 - 80
 	sob	R2, 20$
 	clc
 	return
 
 ; check for plane collision with green land
 ;
-CHKPLA:	tst	PlaneStatus		; is plane crashing already?
+CHKPLA:	tst	PlaneStatus			; is plane crashing already?
 	bne	99$
-	tst	DBGMOD			; debugging?
+	tstb	DebugMode			; debugging?
 	bne	99$
 	mov	PLANX1, R1
-	inc	R1			; fine tuning X1 a bit (making plane thinner)
+	inc	R1				; fine tuning X1 a bit (making plane thinner)
 	call	CHKPLL
 	bcs	80$
 	mov	PLANX2, R1
-	dec	R1			; fine tuning X2
+	dec	R1				; fine tuning X2
 	call	CHKPLL
 	bcs	80$
 	return
 80$:	; collided
-	mov	#1, PlaneStatus		; set plane status to 'crashing'
+	mov	#1, PlaneStatus			; set plane status to 'crashing'
 	; boom sound
-	mov	#2., R0			; sound ID - boom
-	mov	#C_CMD_SOUND, R5	; start sound command
+	mov	#2., R0				; sound ID - boom
+	mov	#C_CMD_SOUND, R5		; start sound command
 	call	CMDEXE	
 99$:	return
 	
@@ -1867,12 +1913,12 @@ OBJCOO:	mov	PRO000, R0
 	; fuel
 	cmpb	(R0), #4.
 	bne	10$
-	asl	R1			; *8, fuel is 8-pix aligned
+	asl	R1				; *8, fuel is 8-pix aligned
 	asl	R1
 	asl	R1
 10$:	mov	R1, R3
 	mov	R2, R4
-	movb	(R0), R0		; not needed to clear high byte
+	movb	(R0), R0			; not needed to clear high byte
 	asl	R0
 	add	OBJDX(R0), R3
 	add	OBJDY(R0), R4
@@ -1882,31 +1928,31 @@ OBJCOO:	mov	PRO000, R0
 ; process keypresses
 PlaneKeys:
 	; plane is crashing?
-	tst	PlaneStatus		; plane is crashing - don't process keys
+	tst	PlaneStatus			; plane is crashing - don't process keys
 	beq	10$
 	return
 10$:	; key shift - fire missile
 	tst	KEYSHI
 	beq	20$
-	tst	MISSLX			; test for missile already present
+	tst	MISSLX				; test for missile already present
 	bne	20$
 	; create missile
-	mov	PlaneX, R0		; PlaneX is float (!) [int][frac]
+	mov	PlaneX, R0			; PlaneX is float (!) [int][frac]
 	clrb	R0
 	swab	R0
-	add	#40., R0		; 32. left margin + 8. plane half-width
+	add	#40., R0			; 32. left margin + 8. plane half-width
 	mov	R0, MisslX
 	mov	#40., MisslY
 	; firing sound
-	tst	BOOMCN			; boom have more priority so check if it's counter still >0
+	tst	BOOMCN				; boom have more priority so check if it's counter still >0
 	bgt	20$
-	mov	#1., R0			; sound ID - fire
-	mov	#C_CMD_SOUND, R5	; start sound command
+	mov	#1., R0				; sound ID - fire
+	mov	#C_CMD_SOUND, R5		; start sound command
 	call	CMDEXE	
 20$:	; right
 	tst	KeyRht
 	beq	30$
-	mov	#2, PlaneDir		; moving right sprite
+	mov	#2, PlaneDir			; moving right sprite
 	add	PlaneVel, PlaneX
 	cmp	PlaneX, #255.-16.*256.
 	blos	PlaneVelInc
@@ -1936,9 +1982,9 @@ PlaneVelInc:
 
 ; draw fuel line
 ;
-DRAFUE:	tst	FUELD			; need to draw?
+DRAFUE:	tst	FUELD				; need to draw?
 	bne	10$
-	bit	#^B1111, FUEL		; still need to draw? (only drawing 1 of 16 to save time)
+	bit	#^B1111, FUEL			; still need to draw? (only drawing 1 of 16 to save time)
 	beq	10$
 	return
 10$:	clr	FUELD
@@ -1946,8 +1992,8 @@ DRAFUE:	tst	FUELD			; need to draw?
 	mov	#118., R1	
 	ash	#-4, R0
 	add	R0, R1
-	mov	#42., R2
-	mov	#09., R5		; 09. - draw fuel
+	mov	#42.-64.+C_FIELD_Y, R2
+	mov	#C_CMD_DRAFUEL, R5		; 09. - draw fuel
 	call	CMDADD
 	return
 
@@ -1958,46 +2004,50 @@ PROFUE:	tst	FUEL
 	beq	90$
 	dec	FUEL
 	return
-90$:	tst	DBGMOD			; debugging?
+90$:	tstb	DebugMode			; debugging?
 	bne	99$
-	tst	PlaneStatus		; already lost?
+	tst	PlaneStatus			; already lost?
 	bne	99$
-	mov	#1, PlaneStatus		; set 'crashing' plane state
+	mov	#1, PlaneStatus			; set 'crashing' plane state
 	; boom sound
-	mov	#2., R0			; sound ID - boom
-	mov	#C_CMD_SOUND, R5	; start sound command
+	mov	#2., R0				; sound ID - boom
+	mov	#C_CMD_SOUND, R5		; start sound command
 	call	CMDEXE	
 99$:	return
 
 
 ; draw score
-DRASCO:	tst	SCORED
-	bne	10$
-	return
-10$:	clr	SCORED
+DrawScore:
+	tst	SCORED
+	beq	99$
+	clr	SCORED
 	cmp	SCORE, #60000.
 	blos	20$
 	mov	#60000., SCORE		; max score number
 	; TODO: in original game maximal score number means end of the game
-20$:	movb	#301, SPRD04		; color byte - green
+20$:	movb	#1, SPRD04		; color byte - green
 	mov	SCORE, R0
 	mov	#14., R1
-	mov	#21., R2
+	mov	#21.-64.+C_FIELD_Y, R2
 	call	SPRDWO
-	return
+99$:	return
+
 
 ; draw hiscore
-DRAHSC:	movb	#303, SPRD04		; color byte - yellow
-	mov	HSCORE, R0
+DrawHScore:
+	movb	#3, SPRD04		; color byte - yellow
+	mov	HScore, R0
 	mov	#21., R1
-	mov	#21., R2
+	mov	#21.-64.+C_FIELD_Y, R2
 	call	SPRDWO
 	return
 
+
 ; draw lives
-DRALIV:	mov	LIVES, R0
+DrawLives:
+	mov	Lives, R0
 	mov	#27., R1
-	mov	#44., R2
+	mov	#44.-64.+C_FIELD_Y, R2
 	call	SPRDDO
 	return
 
@@ -2152,9 +2202,9 @@ SPROW4:	asl	R2
 
 
 SPRD00:	.WORD	0
-SPRD04:	.BYTE	301
+SPRD04:	.BYTE	1
 SPRD05:	.BYTE	60, 60, 60, 60, 60, 0, 0
-SPRD06:	.BYTE	301
+SPRD06:	.BYTE	1
 SPRD07:	.BYTE	60, 0, 0
 SPRD90:	.WORD	10000., 1000., 100., 10., 1
 
@@ -2258,7 +2308,7 @@ CH1TBA:	.WORD	0, CH1PR1, CH1PR2, CH1PR3
 CH2TBA:	.WORD	0, CH2PR1, CH2PR2, CH2PR3
 
 ; out string (x1/x2 font), R0 - addr of asciz, R1 - x, R2 - y
-; codes in string - 301, 302, 303 - change color
+; codes in string - 1, 2, 3 - change color
 ; x1 font print
 FN1PRT:	mov	#CH1TBA, TEMPR5
 	call	FN0PR0
@@ -2280,10 +2330,9 @@ FN0PR0:	asl	R2
 	swab	R0
 	clrb	R0
 	swab	R0
-	cmp	R0, #301
-	blo	20$
+	cmp	R0, #7
+	bhi	20$
 	mov	R0, TEMPR1
-	sub	#300, TEMPR1
 	inc	TEMPR0
 	br	10$
 20$:	mov	TEMPR1, R1
@@ -2297,17 +2346,14 @@ FN0PR0:	asl	R2
 
 
 
-; clear planes 1 & 2
-CLRSC1:	mov	#VADDR, R5
-	mov	#<55000/2>, R3
-10$:	clr	(R5)+
-	sob	R3, 10$
-	return
-
 ; clear screen planes
-CLRSCR:	mov	#C_CMD_CLEASC0, R5	; 2. - clear plane 0
-	call	CMDEXE
-	call	CLRSC1
+ClearScreen:
+	mov	#C_CMD_CLEASC0, R5
+	call	CmdExe
+	mov	#Vaddr, R5
+	mov	#288.*40., R3
+	clr	(R5)+
+	sob	R3, .-2
 	return
 
 
@@ -2378,7 +2424,8 @@ RANDOM:	movb	RANDHI, R0		;LDA	randomHi
 ;.radix 	8
 
 ; vsyinc interrupt
-VSYNI:	inc	VSY1CN
+VsyncInt:
+	inc	VSY1CN
 	inc	VSY2CN
 	rti
 	
@@ -2387,6 +2434,11 @@ VSYNI:	inc	VSY1CN
 ; //////////////////////////////////////////////////////////////////////////////
 ; // DATA 
 ; //////////////////////////////////////////////////////////////////////////////
+
+CurrentMode:	.byte	0
+DebugMode:	.byte	0
+Pause:		.byte	0
+RgbMode:	.byte	377
 
 CMDADR:	.WORD	0		; addr in ppu command buffer
 
@@ -2400,18 +2452,7 @@ TEMPR5:	.WORD	0
 WAICL0:	.WORD	0		; to measure wait time
 WAICLC:	.WORD	0		; avg wait time
 FRAMCN:	.WORD	0		; 'frame' counter
-PAUSE:	.WORD	0
 
-; current mode
-; 0 - main menu prepare, 1 - main menu
-; 2 - level prepare, 3 - play ... etc
-CURMOD:	.WORD	0
-
-; setup vars
-DBGMOD:	.WORD	0
-DBG002:	.WORD	0
-
-; // game variables /////////////////////////////////////////////////////////////////
 
 LEVEL:	.WORD	0		; current level
 SLEVEL:	.WORD	0
@@ -2422,13 +2463,13 @@ HSCORE:	.WORD	0
 FUEL:	.WORD	0
 FUELD:	.WORD	0		; flag to draw fuel line
 
-PlaneX:	.word	0		; plane sprite X (float! 0-255 in h-byte, fractional in l-byte)
-PlaneY:	.word	0		; TODO: plane have different bounding box when turning
-PLANX1:	.WORD	0		; 'actual' plane 'bounding' box (without second Y)
-PLANX2:	.WORD	0		; because plane is starting from PLANEX+2
-
 C_PLAVEL_MIN	= 1*256.
 C_PLADVEL_MIN	= 18.
+
+PlaneX:		.word	0		; plane sprite X (float! 0-255 in h-byte, fractional in l-byte)
+PlaneY:		.word	0		; TODO: plane have different bounding box when turning
+PLANX1:	.WORD	0		; 'actual' plane 'bounding' box (without second Y)
+PLANX2:	.WORD	0		; because plane is starting from PLANEX+2
 
 PlaneDir:	.word	0	; plane is moving, 1-right, 2-left, 0-straight
 PlaneStatus:	.word	0	; plane status, 0 - normal, 1.. - exploding
@@ -2443,7 +2484,6 @@ MISSLY:	.WORD	0
 BOOMCN:	.WORD	0		; boom counter to prevend create missile sound
 
 SCROLY: .WORD   287.    	; scroll line number
-SETRGB:	.WORD	177777		; RGB/GRB switch
 
 BLNXT1:	.WORD	15.		; next block starting left bank width (in 8-pix)
 BLSTA1:	.WORD	15.		; current block starting left bank width
@@ -3020,38 +3060,45 @@ WCP00:	.WORD	177777, 177777, 177777, 177777, 177777, 177777, 177777, 177777
 	.WORD	1403, 0, 0, 0, 0, 0, 0, 0
 	.WORD	0, 0, 0, 140300, 177777, 177777, 177777, 177777
 	.WORD	177777, 177777, 177777, 177777, 177777, 177777, 177777, 177777 
-	
-END:
-	
+
+
+; menu strings
+MsgMenu000:	.asciz	<1>"CONTROLS"<2>":"<3>" ARROWS, SHIFT"
+MsgMenu001:	.asciz	<1>"K1"<2>":"<3>" RGB/GRB"
+MsgMenu002:	.asciz	<1>"K2"<2>":"<3>" DEBUG MODE"
+MsgMenu003:	.asciz	<1>"STOP"<2>":"<3>" RESET"
+MsgMenu004:	.asciz	<1>"PRESS "<3>"SPACE"
+
 ; // ADDRESSes /////////////////////////////////////////////////////////////////
 
-VADDR =100000	; vram for planes 1 & 2
+VADDR 	= 100000	; vram for planes 1 & 2
 
 ; CPU-PPU exchange
-CMDBUF=156000	; ~450 bytes, 224 words command buffer
-PPUYYY=157600	; PPU state
+CMDBUF	= 156000	; ~450 bytes, 224 words command buffer
 
-KEYK2 =157724	; key K2
-KEYSHI=157726	; key SHIFT
-WAIPPU=157730	; PPU wait cycles number
-KEY4  =157732	; key K4
-KEYCOM=157734	; combo was pressed
-RTICN2=157736	; strange interrupts number in PPU
-KEY3  =157740	; key 3
-KEYK1 =157742	; key K1
-KEYSTP=157744	; key STOP
-KEYUST=157746	; key UST
-KEY2  =157750	; key 2
-KEY1  =157752	; key 1
-KEYENT=157754	; key ENTER
-KEYSPC=157756	; key SPACE
-KEYRHT=157760	; key ->
-KEYLFT=157762	; key <-
-KEYDWN=157764	; key DOWN
-KEYUP =157766	; key UP
-KEYCUR=157770	; current key
-VSY2CN=157772	; vsync 2 counter
-VSY1CN=157774	; vsync 1 counter
+KEYK2	= 157724	; key K2
+KEYSHI	= 157726	; key SHIFT
+WAIPPU	= 157730	; PPU wait cycles number
+KEY4  	= 157732	; key K4
+KEYCOM	= 157734	; combo was pressed
+RTICN2	= 157736	; strange interrupts number in PPU
+KEY3  	= 157740	; key 3
+KEYK1 	= 157742	; key K1
+KEYSTP	= 157744	; key STOP
+KEYUST	= 157746	; key UST
+KEY2  	= 157750	; key 2
+KEY1  	= 157752	; key 1
+KEYENT	= 157754	; key ENTER
+KEYSPC	= 157756	; key SPACE
+KEYRHT	= 157760	; key ->
+KEYLFT	= 157762	; key <-
+KEYDWN	= 157764	; key DOWN
+KEYUP 	= 157766	; key UP
+KEYCUR	= 157770	; current key
+VSY2CN	= 157772	; vsync 2 counter
+VSY1CN	= 157774	; vsync 1 counter
+
+PPUYYY	= 157776	; Ppu state
 
 	.even
 CpuEnd:
