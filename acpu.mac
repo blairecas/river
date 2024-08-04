@@ -148,45 +148,30 @@ MAINC2:	mov	KeyShi, R0
 
 
 ; play cycle
-MAINC3:	clr	SecondFrame
-	call	DrawScrollProc
-	tst	DoubleSpeed
+MAINC3:	tst	KeyUp
 	beq	10$
-	inc	SecondFrame
-	call	DrawScrollProc
-10$:	; gameplay
+	call	SCROLL				; it also contains CMDWAI
+	call	DRAWLB				; draw line first asap
+	call	DRAPLA				; draw plane
+	call	ROTATE				; one line of rotation
+10$:	call	SCROLL
+	call	DRAWLB
+	call	DRAPLA
+	call	DRAMIS
+	call	DRAENP
+	call	DRAFUE
+	call	CMDFIN
+	; PPU section is over, now CPU
+	call	DRAWOB				; draw block objects
 	call	PROCOB				; process objects moving etc.
 	call	PROFUE				; process fuel decrease
 	call	CHKPLA				; check plane collision vs land
 	call	PROMIS				; process missile
 	call	PROMI2				; missile vs objects
 	call	PROPL2				; plane vs objects
-	call	PlaneKeys			; process plane keys
-	clr	DoubleSpeed
-	tst	KeyUp
-	beq	20$
-	inc	DoubleSpeed
-20$:	return
-
-DrawScrollProc:
-	call	SCROLL				; it also contains CMDWAI
-	call	DRAWLB				; draw line first asap
-	; drawing & stuff in PPU
-	call	CMDWAI				; PPU commands start waiting
-	call	DRAPLA				; draw plane
-	tst	SecondFrame
-	bne	10$
-	call	DRAMIS				; draw missile
-	call	DRAENP				; draw enemy planes
-10$:	call	DRAFUE				; draw fuel gauge line
-	call	CMDFIN				; PPU commands finish
-	; drawing in CPU
-	tst	SecondFrame
-	bne	20$
-	call	DRAWOB				; draw block objects
+	call	ROTATE
 	call	DrawScore			; (maybe) draw score
-20$:	; rotate
-	call	ROTATE				; one line of rotation
+	call	PlaneKeys			; process plane keys
 	return
 
 
@@ -2527,9 +2512,6 @@ PlaneDir:	.word	0	; plane is moving, 1-right, 2-left, 0-straight
 PlaneStatus:	.word	0	; plane status, 0 - normal, 1.. - exploding
 PlaneVel:	.word	0	; plane velocity (float)
 PlaneDVel:	.word	0	; plane velocity addition (float)
-
-DoubleSpeed:	.word	0
-SecondFrame:	.word	0
 
 MISSLX:	.WORD	0
 MISSLY:	.WORD	0
