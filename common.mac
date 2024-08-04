@@ -1,8 +1,8 @@
 PpuComm		= 157776
 C_VADDR 	= 40000			; in PPU
 
-C_MENU_X	= 8.
-C_MENU_Y	= 180.
+C_MENU_X	= 9.
+C_MENU_Y	= 220.
 
 C_FIELD_Y	= 52.
 C_FIELD_BOTTOM	= 288.-64.+C_FIELD_Y
