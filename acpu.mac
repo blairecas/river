@@ -124,6 +124,7 @@ MAINC1:	call	SCROLL				; set screen scroll ASAP to prevent teardowns (they CAN B
 	call	ROTATE				; one line of rotation
         tst     SCROLY          		; are we at start?
         bne     99$
+	call	SCROLL
 	call	CMDWAI				; PPU commands start waiting
 	call	DRAPLA
 	call	DRAFUE
