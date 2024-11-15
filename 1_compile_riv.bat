@@ -65,6 +65,6 @@ del _appu.bin
 del _mig_zx.bin
 del _mig.bin
 
-@run_ukncbtl.bat
+@2_run_ukncbtl.bat
 
 echo.
