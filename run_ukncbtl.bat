@@ -1,1 +1,1 @@
-start ..\..\ukncbtl\ukncbtl /autostart /disk0:C:\Projects\uknc\00_code\river\main.dsk /boot1
+start ..\..\ukncbtl\ukncbtl /autostart /disk0:..\river\river.dsk /boot1
